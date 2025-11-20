@@ -113,84 +113,98 @@ async def message_handler(update, context):
 
     mode = user_sessions[chat_id].get("mode")
 
-    hf = HiggsfieldAPI(os.getenv("HF_KEY"), os.getenv("HF_SECRET"))
+    hf = HiggsfieldAPI(
+        os.getenv("HF_KEY"),
+        os.getenv("HF_SECRET")
+    )
+
     MODEL = "higgsfield-ai/soul/standard"
 
-    # Start loading indicator
+    # Start loading message
     loading_msg = await update.message.reply_text("⏳ Loading…")
     stop_event = asyncio.Event()
     context.application.create_task(
         loading_animation(context, chat_id, loading_msg.message_id, stop_event)
     )
 
-    # ------------------------------
+    # -------------------------------------------------
     # TEXT → IMAGE
-    # ------------------------------
+    # -------------------------------------------------
     if mode == "text2image":
         payload = {"prompt": text}
+
         resp = hf.submit(MODEL, payload)
         req_id = resp["request_id"]
 
         final = hf.wait_for_result(req_id)
         stop_event.set()
 
-        if final.get("status") == "completed" and "images" in final:
-            await update.message.reply_photo(final["images"][0]["url"])
+        if final.get("status") == "completed":
+            url = final["images"][0]["url"]
+            await update.message.reply_photo(url)
         else:
             await update.message.reply_text(f"❌ Failed: {final.get('status')}")
 
-    # ------------------------------
-    # TEXT → VIDEO
-    # ------------------------------
+    # -------------------------------------------------
+    # TEXT → VIDEO (FIXED PAYLOAD HERE)
+    # -------------------------------------------------
     elif mode == "text2video":
-        payload = {"prompt": text}
+        payload = {
+            "prompt": text,
+            "mode": "video",
+            "num_frames": 80,
+            "motion_strength": "medium",
+            "aspect_ratio": "16:9",
+            "resolution": "720p"
+        }
+
         resp = hf.submit(MODEL, payload)
         req_id = resp["request_id"]
 
         final = hf.wait_for_result(req_id)
         stop_event.set()
 
-        # FIX: prevent KeyError 'video'
-        if final.get("status") == "completed" and final.get("video") and final["video"].get("url"):
+        if final.get("status") == "completed" and "video" in final:
             await update.message.reply_video(final["video"]["url"])
         else:
-            await update.message.reply_text("❌ Video generation failed. Try a simpler prompt.")
+            await update.message.reply_text("❌ Video generation failed. Try simpler prompt.")
 
-    # ------------------------------
+    # -------------------------------------------------
     # CHARACTERS
-    # ------------------------------
+    # -------------------------------------------------
     elif mode == "characters":
         payload = {"prompt": text}
+
         resp = hf.submit(MODEL, payload)
         req_id = resp["request_id"]
 
         final = hf.wait_for_result(req_id)
         stop_event.set()
 
-        if final.get("status") == "completed" and "images" in final:
+        if final.get("status") == "completed":
             await update.message.reply_photo(final["images"][0]["url"])
         else:
             await update.message.reply_text(f"❌ Failed: {final.get('status')}")
 
-    # ------------------------------
+    # -------------------------------------------------
     # MOTIONS
-    # ------------------------------
+    # -------------------------------------------------
     elif mode == "motions":
         payload = {"prompt": text}
+
         resp = hf.submit(MODEL, payload)
         req_id = resp["request_id"]
 
         final = hf.wait_for_result(req_id)
         stop_event.set()
 
-        # FIX: prevent crash
-        if final.get("status") == "completed" and final.get("video") and final["video"].get("url"):
+        if final.get("status") == "completed":
             await update.message.reply_video(final["video"]["url"])
         else:
             await update.message.reply_text(f"❌ Failed: {final.get('status')}")
 
 # ---------------------------
-# PHOTO HANDLER
+# PHOTO HANDLER (image → video)
 # ---------------------------
 async def photo_handler(update, context):
     chat_id = update.message.chat_id
