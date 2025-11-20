@@ -1,100 +1,169 @@
 import os
-import logging
 import asyncio
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    ContextTypes,
     filters,
+    CallbackQueryHandler,
 )
 from higgsfield_api import HiggsfieldAPI
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+HF = HiggsfieldAPI(
+    hf_key=os.getenv("HF_KEY"),
+    hf_secret=os.getenv("HF_SECRET"),
+)
 
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-HF_KEY = os.getenv("HF_KEY")
-HF_SECRET = os.getenv("HF_SECRET")
-
-api = HiggsfieldAPI(hf_key=HF_KEY, hf_secret=HF_SECRET)
-
-user_state = {}
+USER_STATE = {}
 
 
-async def download_file(telegram_file):
-    file_path = f"/tmp/{telegram_file.file_id}.jpg"
-    await telegram_file.download_to_drive(file_path)
-    return file_path
+# -----------------------------
+#        MAIN MENU
+# -----------------------------
+def menu_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎬 DoP Image → Video", callback_data="dop")],
+        [InlineKeyboardButton("🍿 Popcorn I2V", callback_data="popcorn")],
+        [InlineKeyboardButton("🧑‍🦰 Face Animate", callback_data="face_animate")],
+        [InlineKeyboardButton("👤 Face → Video", callback_data="face2video")],
+        [InlineKeyboardButton("⏩ Extend Video", callback_data="extend")],
+        [InlineKeyboardButton("🎨 Stylize Image", callback_data="stylize")],
+        [InlineKeyboardButton("🖼 Text → Image", callback_data="txt2img")],
+        [InlineKeyboardButton("🎞 Text → Video", callback_data="txt2video")],
+        [InlineKeyboardButton("📊 Check Job Status", callback_data="status")],
+    ])
 
 
-async def start(update, context):
-    await update.message.reply_text("Send me a photo to begin.")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Welcome to Higgsfield Cloud Bot.\nChoose an option:",
+        reply_markup=menu_keyboard(),
+    )
 
 
-async def handle_photo(update, context):
-    chat_id = update.message.chat_id
+# -----------------------------
+#      CALLBACK BUTTONS
+# -----------------------------
+async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    mode = query.data
+    chat = query.message.chat_id
+
+    USER_STATE[chat] = {"mode": mode}
+
+    await query.edit_message_text(f"Selected: {mode}\nNow send input file or prompt.")
+
+
+# -----------------------------
+#      PHOTO / VIDEO INPUT
+# -----------------------------
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.message.chat_id
+
+    if chat not in USER_STATE:
+        await update.message.reply_text("Select an option first: /start")
+        return
+
     file = await update.message.photo[-1].get_file()
-    image_path = await download_file(file)
-    user_state[chat_id] = {"image": image_path}
-    await update.message.reply_text("Image received. Now send your text prompt.")
+    local = f"/tmp/{file.file_unique_id}.jpg"
+    await file.download_to_drive(local)
+
+    USER_STATE[chat]["file"] = local
+
+    await update.message.reply_text("Photo saved. Now send your prompt.")
 
 
-async def handle_prompt(update, context):
-    chat_id = update.message.chat_id
+async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.message.chat_id
+
+    file = await update.message.video.get_file()
+    local = f"/tmp/{file.file_unique_id}.mp4"
+    await file.download_to_drive(local)
+
+    USER_STATE[chat]["file"] = local
+
+    await update.message.reply_text("Video saved. Now send your prompt.")
+
+
+# -----------------------------
+#      TEXT INPUT (PROMPTS)
+# -----------------------------
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.message.chat_id
+
+    if chat not in USER_STATE:
+        await update.message.reply_text("Select an option first: /start")
+        return
+
+    mode = USER_STATE[chat]["mode"]
     prompt = update.message.text
 
-    if chat_id not in user_state or "image" not in user_state[chat_id]:
-        await update.message.reply_text("Send a photo first.")
+    await update.message.reply_text(f"Processing {mode}...")
+
+    if mode == "dop":
+        job = HF.dop(USER_STATE[chat]["file"], prompt)
+
+    elif mode == "popcorn":
+        job = HF.popcorn(USER_STATE[chat]["file"], prompt)
+
+    elif mode == "face_animate":
+        job = HF.face_animate(USER_STATE[chat]["file"])
+
+    elif mode == "face2video":
+        job = HF.face_to_video(USER_STATE[chat]["file"], prompt)
+
+    elif mode == "extend":
+        job = HF.extend_video(USER_STATE[chat]["file"], prompt)
+
+    elif mode == "stylize":
+        job = HF.stylize(USER_STATE[chat]["file"], prompt)
+
+    elif mode == "txt2img":
+        job = HF.text_to_image(prompt)
+
+    elif mode == "txt2video":
+        job = HF.text_to_video(prompt)
+
+    elif mode == "status":
+        job = HF.job_status(prompt)
+        await update.message.reply_text(str(job))
         return
 
-    image_path = user_state[chat_id]["image"]
-
-    await update.message.reply_text("Creating DoP video... please wait.")
-
-    try:
-        job_set_id, _ = api.create_dop_job(
-            image_url=image_path,
-            prompt=prompt
-        )
-    except Exception as e:
-        await update.message.reply_text(f"API Error: {e}")
+    else:
+        await update.message.reply_text("Unknown mode.")
         return
 
-    if not job_set_id:
-        await update.message.reply_text("Failed to create job.")
-        return
+    job_id = job.get("job_set_id")
 
-    for _ in range(45):
-        try:
-            status_data = api.get_job_status(job_set_id)
-        except Exception as e:
-            await update.message.reply_text(f"Status error: {e}")
-            return
+    await update.message.reply_text(f"Job started: {job_id}\nChecking status...")
 
-        status = status_data.get("status")
-        video_url = (
-            status_data.get("raw", {}).get("url")
-            if isinstance(status_data.get("raw"), dict)
-            else None
-        )
+    # Polling
+    for _ in range(40):
+        status = HF.job_status(job_id)
+        state = status.get("state")
+        output = status.get("output_url")
 
-        if status == "completed" and video_url:
-            await update.message.reply_video(video=video_url)
+        if state == "completed" and output:
+            if output.endswith(".mp4"):
+                await update.message.reply_video(video=output)
+            else:
+                await update.message.reply_photo(photo=output)
             return
 
         await asyncio.sleep(4)
 
-    await update.message.reply_text("Still processing… try again later.")
+    await update.message.reply_text("Still processing...")
 
 
-async def unknown(update, context):
-    await update.message.reply_text("Send /start, a photo, or a text prompt.")
-
-
-def run_bot():
-    app = ApplicationBuilder().token(TOKEN).build()
+# -----------------------------
+#      REGISTER HANDLERS
+# -----------------------------
+def register_handlers(app):
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(menu_callback))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_prompt))
-    app.add_handler(MessageHandler(filters.COMMAND, unknown))
-    app.run_polling()
+    app.add_handler(MessageHandler(filters.VIDEO, handle_video))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
