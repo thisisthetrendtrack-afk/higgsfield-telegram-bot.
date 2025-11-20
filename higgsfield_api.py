@@ -1,11 +1,14 @@
-import requests
+import os
 import time
+import uuid
+import requests
+
+
+BASE_URL = "https://platform.higgsfield.ai"
 
 
 class HiggsfieldAPI:
-    BASE_URL = "https://platform.higgsfield.ai"
-
-    def __init__(self, key: str, secret: str):
+    def __init__(self, key, secret):
         self.key = key
         self.secret = secret
         self.headers = {
@@ -13,40 +16,47 @@ class HiggsfieldAPI:
             "Content-Type": "application/json"
         }
 
-    # --------------------------
-    # SUBMIT A GENERATION JOB
-    # --------------------------
-    def submit(self, model_id: str, payload: dict) -> dict:
-        """
-        Example model_id: "higgsfield-ai/soul/standard"
-        """
-        url = f"{self.BASE_URL}/{model_id}"
+    # -----------------------------
+    # SUBMIT GENERATION REQUEST
+    # -----------------------------
+    def submit(self, model_id, payload):
+        url = f"{BASE_URL}/{model_id}"
+
+        print("Submitting to:", url)
+        print("Payload:", payload)
+
         resp = requests.post(url, headers=self.headers, json=payload)
-        resp.raise_for_status()
-        return resp.json()
 
-    # --------------------------
-    # GET STATUS OF A JOB
-    # --------------------------
-    def get_status(self, request_id: str) -> dict:
-        url = f"{self.BASE_URL}/requests/{request_id}/status"
+        if resp.status_code != 200:
+            raise RuntimeError(f"API error: {resp.status_code} {resp.text}")
+
+        data = resp.json()
+        return data  # contains request_id + status_url
+
+    # -----------------------------
+    # POLL STATUS
+    # -----------------------------
+    def get_status(self, request_id):
+        url = f"{BASE_URL}/requests/{request_id}/status"
+
         resp = requests.get(url, headers=self.headers)
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            raise RuntimeError(f"Status error: {resp.status_code}")
+
         return resp.json()
 
-    # --------------------------
-    # WAIT UNTIL JOB FINISHES
-    # --------------------------
-    def wait_for_result(self, request_id: str, interval=4, timeout=300):
-        elapsed = 0
-        while elapsed < timeout:
+    # -----------------------------
+    # WAIT UNTIL COMPLETED
+    # -----------------------------
+    def wait_for_result(self, request_id, delay=5):
+        while True:
             data = self.get_status(request_id)
+
             status = data.get("status")
+
+            print("Status:", status)
 
             if status in ["completed", "failed", "nsfw"]:
                 return data
 
-            time.sleep(interval)
-            elapsed += interval
-
-        return {"status": "timeout", "request_id": request_id}
+            time.sleep(delay)
