@@ -27,19 +27,18 @@ async def start(update, context):
         [InlineKeyboardButton("💫 Motions", callback_data="motions")],
     ]
 
-    welcome = (
-        "🤖 *Welcome to Higgsfield Bot*\n"
-        "Create AI Images & Videos using official Higgsfield Cloud.\n\n"
+    welcome_text = (
+        "🤖 *Welcome to Higgsfield AI Bot*\n"
+        "Create images & videos using official Higgsfield Cloud.\n\n"
         "✨ Bot by @honeyhoney44\n"
         "Select an option below."
     )
 
     await update.message.reply_text(
-        welcome,
+        welcome_text,
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
-
 
 # ---------------------------
 # HELP COMMAND
@@ -48,13 +47,23 @@ async def help_cmd(update, context):
     await update.message.reply_text(
         "📌 Available Commands:\n\n"
         "/text2image – Generate images from text\n"
-        "/text2video – Generate videos (Soul)\n"
+        "/text2video – Generate videos from text (Soul)\n"
         "/image2video – Generate video from uploaded image\n"
         "/characters – Create consistent characters\n"
         "/motions – Apply motions\n"
         "/status <id> – Check generation status\n"
         "/cancel <id> – Cancel queued generation"
     )
+
+
+# ---------------------------
+# CLEAN LONG PROMPTS
+# ---------------------------
+def clean_prompt(t):
+    """Fix long prompt issues by trimming invisible characters"""
+    if not t:
+        return ""
+    return t.encode("utf-8", "ignore").decode("utf-8").strip()
 
 
 # ---------------------------
@@ -84,13 +93,15 @@ async def button_handler(update, context):
     elif mode == "image2video":
         await query.edit_message_text("📸 Send an image first. Then send a prompt.")
 
-
 # ---------------------------
-# MESSAGE HANDLER (text)
+# TEXT HANDLER
 # ---------------------------
 async def message_handler(update, context):
     chat_id = update.message.chat_id
-    text = update.message.text
+    raw_text = update.message.text
+
+    # Fix long prompt
+    text = clean_prompt(raw_text)
 
     if chat_id not in user_sessions:
         await update.message.reply_text("Please choose from the menu using /start")
@@ -98,41 +109,48 @@ async def message_handler(update, context):
 
     mode = user_sessions[chat_id].get("mode")
 
+    # Initialize API client
     hf = HiggsfieldAPI(
         os.getenv("HF_KEY"),
         os.getenv("HF_SECRET")
     )
 
-    # Unified Higgsfield Model
     MODEL = "higgsfield-ai/soul/standard"
 
     # ------------------------------
     # TEXT → IMAGE
     # ------------------------------
     if mode == "text2image":
-        payload = {"prompt": text}
+        payload = {
+            "prompt": text,
+            "aspect_ratio": "16:9",
+            "resolution": "720p"
+        }
 
         resp = hf.submit(MODEL, payload)
         req_id = resp["request_id"]
-
         await update.message.reply_text(f"🟦 Image generation started.\nRequest ID: `{req_id}`", parse_mode="Markdown")
 
         final = hf.wait_for_result(req_id)
 
         if final["status"] == "completed":
-            await update.message.reply_photo(final["images"][0]["url"])
+            url = final["images"][0]["url"]
+            await update.message.reply_photo(url)
         else:
             await update.message.reply_text(f"❌ Failed: {final['status']}")
 
     # ------------------------------
-    # TEXT → VIDEO (Soul)
+    # TEXT → VIDEO
     # ------------------------------
     elif mode == "text2video":
-        payload = {"prompt": text}
+        payload = {
+            "prompt": text,
+            "aspect_ratio": "16:9",
+            "resolution": "720p"
+        }
 
         resp = hf.submit(MODEL, payload)
         req_id = resp["request_id"]
-
         await update.message.reply_text(f"🎬 Video generation started.\nRequest ID: `{req_id}`", parse_mode="Markdown")
 
         final = hf.wait_for_result(req_id)
@@ -150,7 +168,6 @@ async def message_handler(update, context):
 
         resp = hf.submit(MODEL, payload)
         req_id = resp["request_id"]
-
         await update.message.reply_text(f"👤 Character creation started.\nID: `{req_id}`", parse_mode="Markdown")
 
         final = hf.wait_for_result(req_id)
@@ -168,7 +185,6 @@ async def message_handler(update, context):
 
         resp = hf.submit(MODEL, payload)
         req_id = resp["request_id"]
-
         await update.message.reply_text(f"💫 Motion generation started.\nID: `{req_id}`", parse_mode="Markdown")
 
         final = hf.wait_for_result(req_id)
@@ -180,7 +196,7 @@ async def message_handler(update, context):
 
 
 # ---------------------------
-# PHOTO HANDLER (image → video)
+# PHOTO HANDLER
 # ---------------------------
 async def photo_handler(update, context):
     chat_id = update.message.chat_id
@@ -194,7 +210,6 @@ async def photo_handler(update, context):
     await file.download_to_drive(img_path)
 
     user_sessions[chat_id]["image"] = img_path
-
     await update.message.reply_text("📌 Image received. Now send your video prompt.")
 
 
@@ -223,7 +238,6 @@ async def cancel_cmd(update, context):
 
     req_id = context.args[0]
     hf = HiggsfieldAPI(os.getenv("HF_KEY"), os.getenv("HF_SECRET"))
-
     url = f"https://platform.higgsfield.ai/requests/{req_id}/cancel"
     resp = requests.post(url, headers=hf.headers)
 
