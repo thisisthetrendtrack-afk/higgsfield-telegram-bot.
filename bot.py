@@ -55,17 +55,6 @@ async def help_cmd(update, context):
         "/cancel <id> – Cancel queued generation"
     )
 
-
-# ---------------------------
-# CLEAN LONG PROMPTS
-# ---------------------------
-def clean_prompt(t):
-    """Fix long prompt issues by trimming invisible characters"""
-    if not t:
-        return ""
-    return t.encode("utf-8", "ignore").decode("utf-8").strip()
-
-
 # ---------------------------
 # BUTTON HANDLER
 # ---------------------------
@@ -98,10 +87,7 @@ async def button_handler(update, context):
 # ---------------------------
 async def message_handler(update, context):
     chat_id = update.message.chat_id
-    raw_text = update.message.text
-
-    # Fix long prompt
-    text = clean_prompt(raw_text)
+    text = update.message.text
 
     if chat_id not in user_sessions:
         await update.message.reply_text("Please choose from the menu using /start")
@@ -115,6 +101,7 @@ async def message_handler(update, context):
         os.getenv("HF_SECRET")
     )
 
+    # Unified Model
     MODEL = "higgsfield-ai/soul/standard"
 
     # ------------------------------
@@ -122,9 +109,7 @@ async def message_handler(update, context):
     # ------------------------------
     if mode == "text2image":
         payload = {
-            "prompt": text,
-            "aspect_ratio": "16:9",
-            "resolution": "720p"
+            "prompt": text
         }
 
         resp = hf.submit(MODEL, payload)
@@ -133,20 +118,18 @@ async def message_handler(update, context):
 
         final = hf.wait_for_result(req_id)
 
-        if final["status"] == "completed":
+        if final.get("status") == "completed":
             url = final["images"][0]["url"]
             await update.message.reply_photo(url)
         else:
-            await update.message.reply_text(f"❌ Failed: {final['status']}")
+            await update.message.reply_text(f"❌ Failed: {final.get('status')}")
 
     # ------------------------------
-    # TEXT → VIDEO
+    # TEXT → VIDEO (SOUL)
     # ------------------------------
     elif mode == "text2video":
         payload = {
-            "prompt": text,
-            "aspect_ratio": "16:9",
-            "resolution": "720p"
+            "prompt": text
         }
 
         resp = hf.submit(MODEL, payload)
@@ -155,10 +138,10 @@ async def message_handler(update, context):
 
         final = hf.wait_for_result(req_id)
 
-        if final["status"] == "completed":
+        if final.get("status") == "completed":
             await update.message.reply_video(final["video"]["url"])
         else:
-            await update.message.reply_text(f"❌ Failed: {final['status']}")
+            await update.message.reply_text(f"❌ Failed: {final.get('status')}")
 
     # ------------------------------
     # CHARACTERS
@@ -172,10 +155,10 @@ async def message_handler(update, context):
 
         final = hf.wait_for_result(req_id)
 
-        if final["status"] == "completed":
+        if final.get("status") == "completed":
             await update.message.reply_photo(final["images"][0]["url"])
         else:
-            await update.message.reply_text(f"❌ Failed: {final['status']}")
+            await update.message.reply_text(f"❌ Failed: {final.get('status')}")
 
     # ------------------------------
     # MOTIONS
@@ -189,14 +172,13 @@ async def message_handler(update, context):
 
         final = hf.wait_for_result(req_id)
 
-        if final["status"] == "completed":
+        if final.get("status") == "completed":
             await update.message.reply_video(final["video"]["url"])
         else:
-            await update.message.reply_text(f"❌ Failed: {final['status']}")
-
+            await update.message.reply_text(f"❌ Failed: {final.get('status')}")
 
 # ---------------------------
-# PHOTO HANDLER
+# PHOTO HANDLER (image → video)
 # ---------------------------
 async def photo_handler(update, context):
     chat_id = update.message.chat_id
@@ -210,8 +192,8 @@ async def photo_handler(update, context):
     await file.download_to_drive(img_path)
 
     user_sessions[chat_id]["image"] = img_path
-    await update.message.reply_text("📌 Image received. Now send your video prompt.")
 
+    await update.message.reply_text("📌 Image received. Now send your video prompt.")
 
 # ---------------------------
 # STATUS COMMAND
@@ -227,7 +209,6 @@ async def status_cmd(update, context):
 
     await update.message.reply_text(f"📊 Status: *{data['status']}*", parse_mode="Markdown")
 
-
 # ---------------------------
 # CANCEL COMMAND
 # ---------------------------
@@ -238,11 +219,11 @@ async def cancel_cmd(update, context):
 
     req_id = context.args[0]
     hf = HiggsfieldAPI(os.getenv("HF_KEY"), os.getenv("HF_SECRET"))
+
     url = f"https://platform.higgsfield.ai/requests/{req_id}/cancel"
     resp = requests.post(url, headers=hf.headers)
 
     await update.message.reply_text(f"🛑 Cancel response: {resp.status_code}")
-
 
 # ---------------------------
 # REGISTER HANDLERS
