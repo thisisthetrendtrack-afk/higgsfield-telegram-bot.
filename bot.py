@@ -67,18 +67,39 @@ async def button_handler(update, context):
 
     user_sessions[chat_id] = {"mode": mode}
 
-    mode_texts = {
-        "text2image": "📝 Send your *text prompt* for Image Generation.",
-        "text2video": "📝 Send your *text prompt* for Soul Video Generation.",
-        "characters": "📝 Send your *prompt* for Character Creation.",
-        "motions": "📝 Send your prompt for Motion Generation.",
-        "image2video": "📸 Send an image first. Then send a prompt."
-    }
+    if mode == "text2image":
+        await query.edit_message_text("📝 Send your *text prompt* for Image Generation.", parse_mode="Markdown")
 
-    await query.edit_message_text(
-        mode_texts.get(mode, "Send your prompt."),
-        parse_mode="Markdown"
-    )
+    elif mode == "text2video":
+        await query.edit_message_text("📝 Send your *text prompt* for Soul Video Generation.", parse_mode="Markdown")
+
+    elif mode == "characters":
+        await query.edit_message_text("📝 Send your *prompt* for Character Creation.", parse_mode="Markdown")
+
+    elif mode == "motions":
+        await query.edit_message_text("📝 Send your prompt for Motion Generation.", parse_mode="Markdown")
+
+    elif mode == "image2video":
+        await query.edit_message_text("📸 Send an image first. Then send a prompt.")
+
+# ----------------------------------------------------
+# LOADING ANIMATION (4 sec updates)
+# ----------------------------------------------------
+async def loading_animation(context, chat_id, message_id, stop_event):
+    frames = ["⏳ Loading…", "🔄 Generating…", "🔃 Almost done…"]
+    i = 0
+    while not stop_event.is_set():
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=frames[i % len(frames)]
+            )
+        except:
+            pass
+        i += 1
+        await asyncio.sleep(4)  # every 4 seconds
+
 
 # ---------------------------
 # TEXT HANDLER
@@ -93,7 +114,6 @@ async def message_handler(update, context):
 
     mode = user_sessions[chat_id].get("mode")
 
-    # Initialize API client
     hf = HiggsfieldAPI(
         os.getenv("HF_KEY"),
         os.getenv("HF_SECRET")
@@ -101,85 +121,81 @@ async def message_handler(update, context):
 
     MODEL = "higgsfield-ai/soul/standard"
 
-    # IMAGE: TEXT → IMAGE
+    # Start loading message
+    loading_msg = await update.message.reply_text("⏳ Loading…")
+    stop_event = asyncio.Event()
+    context.application.create_task(
+        loading_animation(context, chat_id, loading_msg.message_id, stop_event)
+    )
+
+    # -------------------------------------------------
+    # TEXT → IMAGE
+    # -------------------------------------------------
     if mode == "text2image":
         payload = {"prompt": text}
-        resp = hf.submit(MODEL, payload)
-        req_id = resp.get("request_id")
 
-        await update.message.reply_text(
-            f"🟦 Image generation started.\nRequest ID: `{req_id}`",
-            parse_mode="Markdown"
-        )
-        await update.message.reply_text("🟡 Queued… please wait")
+        resp = hf.submit(MODEL, payload)
+        req_id = resp["request_id"]
 
         final = hf.wait_for_result(req_id)
+        stop_event.set()
 
         if final.get("status") == "completed":
-            await update.message.reply_photo(final["images"][0]["url"])
+            url = final["images"][0]["url"]
+            await update.message.reply_photo(url)
         else:
             await update.message.reply_text(f"❌ Failed: {final.get('status')}")
-        return
 
-    # VIDEO: TEXT → VIDEO
+    # -------------------------------------------------
+    # TEXT → VIDEO
+    # -------------------------------------------------
     elif mode == "text2video":
         payload = {"prompt": text}
-        resp = hf.submit(MODEL, payload)
-        req_id = resp.get("request_id")
 
-        await update.message.reply_text(
-            f"🎬 Video generation started.\nRequest ID: `{req_id}`",
-            parse_mode="Markdown"
-        )
-        await update.message.reply_text("🟡 Queued… please wait")
+        resp = hf.submit(MODEL, payload)
+        req_id = resp["request_id"]
 
         final = hf.wait_for_result(req_id)
+        stop_event.set()
 
         if final.get("status") == "completed":
             await update.message.reply_video(final["video"]["url"])
         else:
             await update.message.reply_text(f"❌ Failed: {final.get('status')}")
-        return
 
+    # -------------------------------------------------
     # CHARACTERS
+    # -------------------------------------------------
     elif mode == "characters":
         payload = {"prompt": text}
-        resp = hf.submit(MODEL, payload)
-        req_id = resp.get("request_id")
 
-        await update.message.reply_text(
-            f"👤 Character generation started.\nID: `{req_id}`",
-            parse_mode="Markdown"
-        )
-        await update.message.reply_text("🟡 Queued… please wait")
+        resp = hf.submit(MODEL, payload)
+        req_id = resp["request_id"]
 
         final = hf.wait_for_result(req_id)
+        stop_event.set()
 
         if final.get("status") == "completed":
             await update.message.reply_photo(final["images"][0]["url"])
         else:
             await update.message.reply_text(f"❌ Failed: {final.get('status')}")
-        return
 
+    # -------------------------------------------------
     # MOTIONS
+    # -------------------------------------------------
     elif mode == "motions":
         payload = {"prompt": text}
-        resp = hf.submit(MODEL, payload)
-        req_id = resp.get("request_id")
 
-        await update.message.reply_text(
-            f"💫 Motion generation started.\nID: `{req_id}`",
-            parse_mode="Markdown"
-        )
-        await update.message.reply_text("🟡 Queued… please wait")
+        resp = hf.submit(MODEL, payload)
+        req_id = resp["request_id"]
 
         final = hf.wait_for_result(req_id)
+        stop_event.set()
 
         if final.get("status") == "completed":
             await update.message.reply_video(final["video"]["url"])
         else:
             await update.message.reply_text(f"❌ Failed: {final.get('status')}")
-        return
 
 # ---------------------------
 # PHOTO HANDLER
@@ -188,7 +204,7 @@ async def photo_handler(update, context):
     chat_id = update.message.chat_id
 
     if chat_id not in user_sessions or user_sessions[chat_id]["mode"] != "image2video":
-        await update.message.reply_text("Please select Image → Video from /start first.")
+        await update.message.reply_text("To use Image → Video, click /start and select Image2Video first.")
         return
 
     file = await update.message.photo[-1].get_file()
@@ -197,27 +213,29 @@ async def photo_handler(update, context):
 
     user_sessions[chat_id]["image"] = img_path
 
-    await update.message.reply_text("📌 Image saved. Now send your text prompt.")
+    await update.message.reply_text("📌 Image received. Now send your video prompt.")
 
 # ---------------------------
 # STATUS COMMAND
 # ---------------------------
 async def status_cmd(update, context):
-    if not context.args:
-        return await update.message.reply_text("Usage: /status <request_id>")
+    if len(context.args) == 0:
+        await update.message.reply_text("Usage: /status <request_id>")
+        return
 
     req_id = context.args[0]
     hf = HiggsfieldAPI(os.getenv("HF_KEY"), os.getenv("HF_SECRET"))
     data = hf.get_status(req_id)
 
-    await update.message.reply_text(f"📊 Status: {data.get('status')}")
+    await update.message.reply_text(f"📊 Status: *{data['status']}*", parse_mode="Markdown")
 
 # ---------------------------
 # CANCEL COMMAND
 # ---------------------------
 async def cancel_cmd(update, context):
-    if not context.args:
-        return await update.message.reply_text("Usage: /cancel <request_id>")
+    if len(context.args) == 0:
+        await update.message.reply_text("Usage: /cancel <request_id>")
+        return
 
     req_id = context.args[0]
     hf = HiggsfieldAPI(os.getenv("HF_KEY"), os.getenv("HF_SECRET"))
