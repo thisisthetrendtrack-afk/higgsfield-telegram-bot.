@@ -94,9 +94,7 @@ async def message_handler(update, context):
     hf = HiggsfieldAPI(os.getenv("HF_KEY"), os.getenv("HF_SECRET"))
 
     IMAGE_MODEL = "higgsfield-ai/soul/standard"
-
-    # ❗ FIXED MODEL FOR VIDEO (ONLY CHANGE)
-    VIDEO_MODEL = "higgsfield-ai/dop/preview"
+    VIDEO_MODEL = "higgsfield-ai/dop/preview"  # ✅ FIXED MODEL
 
     # Start loading animation
     loading_msg = await update.message.reply_text("⏳ Loading…")
@@ -124,7 +122,7 @@ async def message_handler(update, context):
             await update.message.reply_text(f"❌ Failed: {final.get('status')}")
 
     # ------------------------------
-    # IMAGE → VIDEO (DOP)
+    # IMAGE → VIDEO (DoP)
     # ------------------------------
     elif mode == "image2video":
         if "image" not in user_sessions[chat_id]:
@@ -134,9 +132,10 @@ async def message_handler(update, context):
 
         image_path = user_sessions[chat_id]["image"]
 
-        # Upload image to tmp hosting
+        # Upload image to free hosting
         with open(image_path, "rb") as f:
             upload = requests.post("https://tmpfiles.org/api/v1/upload", files={"file": f})
+
         image_url = upload.json()["data"]["url"].replace("/download", "")
 
         payload = {
