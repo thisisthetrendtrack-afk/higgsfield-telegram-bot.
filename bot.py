@@ -4,7 +4,6 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
-    ApplicationBuilder,
     filters,
 )
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
@@ -14,6 +13,33 @@ import requests
 
 # GLOBAL SESSION MEMORY
 user_sessions = {}
+
+
+# ==========================================
+#  PROGRESS LOADING FUNCTION (NEW FEATURE)
+# ==========================================
+async def send_progress(update, context, hf, req_id):
+    """
+    Sends loading updates while waiting for generation.
+    Does NOT change working logic.
+    """
+    message = await update.message.reply_text("⏳ *Processing...*", parse_mode="Markdown")
+
+    while True:
+        data = hf.get_status(req_id)
+        status = data.get("status", "")
+
+        if status == "queued":
+            await message.edit_text("🟡 *Queued... please wait*", parse_mode="Markdown")
+
+        elif status == "in_progress":
+            await message.edit_text("🟠 *Generating... working on it*", parse_mode="Markdown")
+
+        elif status in ["completed", "failed", "nsfw"]:
+            return data
+
+        await asyncio.sleep(5)
+
 
 # ---------------------------
 # START COMMAND
@@ -47,13 +73,13 @@ async def start(update, context):
 async def help_cmd(update, context):
     await update.message.reply_text(
         "📌 Available Commands:\n\n"
-        "/text2image – Generate images from text\n"
-        "/text2video – Generate videos from text (Soul)\n"
-        "/image2video – Generate video from uploaded image\n"
-        "/characters – Create consistent characters\n"
-        "/motions – Apply motions\n"
-        "/status <id> – Check generation status\n"
-        "/cancel <id> – Cancel queued generation"
+        "/text2image – Generate images\n"
+        "/text2video – Generate videos (Soul)\n"
+        "/image2video – Generate video from image\n"
+        "/characters – Generate characters\n"
+        "/motions – Motion videos\n"
+        "/status <id> – Check status\n"
+        "/cancel <id> – Cancel request"
     )
 
 
@@ -70,42 +96,39 @@ async def button_handler(update, context):
     user_sessions[chat_id] = {"mode": mode}
 
     if mode == "text2image":
-        await query.edit_message_text("📝 Send your text prompt for Image Generation.", parse_mode="Markdown")
+        await query.edit_message_text("📝 Send your prompt for Image Generation.", parse_mode="Markdown")
 
     elif mode == "text2video":
-        await query.edit_message_text("📝 Send your text prompt for Soul Video Generation.", parse_mode="Markdown")
+        await query.edit_message_text("📝 Send your prompt for Soul Video.", parse_mode="Markdown")
 
     elif mode == "characters":
-        await query.edit_message_text("📝 Send your character prompt.", parse_mode="Markdown")
+        await query.edit_message_text("📝 Send your prompt for Characters.", parse_mode="Markdown")
 
     elif mode == "motions":
         await query.edit_message_text("📝 Send your motion prompt.", parse_mode="Markdown")
 
     elif mode == "image2video":
-        await query.edit_message_text("📸 Send an image first. Then send a prompt.")
+        await query.edit_message_text("📸 Send an image first. Then send the video prompt.")
 
 
 # ---------------------------
-# MESSAGE HANDLER (text)
+# MESSAGE HANDLER (TEXT)
 # ---------------------------
 async def message_handler(update, context):
     chat_id = update.message.chat_id
     text = update.message.text
 
     if chat_id not in user_sessions:
-        await update.message.reply_text("Please choose an option using /start")
-        return
+        return await update.message.reply_text("Please choose from the menu using /start")
 
-    mode = user_sessions[chat_id].get("mode")
+    mode = user_sessions[chat_id]["mode"]
 
-    hf = HiggsfieldAPI(
-        os.getenv("HF_KEY"),
-        os.getenv("HF_SECRET")
-    )
-
+    hf = HiggsfieldAPI(os.getenv("HF_KEY"), os.getenv("HF_SECRET"))
     MODEL = "higgsfield-ai/soul/standard"
 
+    # ------------------------------
     # TEXT → IMAGE
+    # ------------------------------
     if mode == "text2image":
         payload = {"prompt": text}
 
@@ -117,14 +140,17 @@ async def message_handler(update, context):
             parse_mode="Markdown"
         )
 
-        final = hf.wait_for_result(req_id)
+        # NEW
+        final = await send_progress(update, context, hf, req_id)
 
         if final.get("status") == "completed":
             await update.message.reply_photo(final["images"][0]["url"])
         else:
-            await update.message.reply_text(f"❌ Failed: {final.get('status')}")
+            await update.message.reply_text(f"❌ Failed: {final['status']}")
 
+    # ------------------------------
     # TEXT → VIDEO
+    # ------------------------------
     elif mode == "text2video":
         payload = {"prompt": text}
 
@@ -136,14 +162,17 @@ async def message_handler(update, context):
             parse_mode="Markdown"
         )
 
-        final = hf.wait_for_result(req_id)
+        # NEW
+        final = await send_progress(update, context, hf, req_id)
 
         if final.get("status") == "completed":
             await update.message.reply_video(final["video"]["url"])
         else:
-            await update.message.reply_text(f"❌ Failed: {final.get('status')}")
+            await update.message.reply_text(f"❌ Failed: {final['status']}")
 
+    # ------------------------------
     # CHARACTERS
+    # ------------------------------
     elif mode == "characters":
         payload = {"prompt": text}
 
@@ -151,18 +180,21 @@ async def message_handler(update, context):
         req_id = resp["request_id"]
 
         await update.message.reply_text(
-            f"👤 Character creation started.\nID: `{req_id}`",
+            f"👤 Character generation started.\nID: `{req_id}`",
             parse_mode="Markdown"
         )
 
-        final = hf.wait_for_result(req_id)
+        # NEW
+        final = await send_progress(update, context, hf, req_id)
 
         if final.get("status") == "completed":
             await update.message.reply_photo(final["images"][0]["url"])
         else:
-            await update.message.reply_text(f"❌ Failed: {final.get('status')}")
+            await update.message.reply_text(f"❌ Failed: {final['status']}")
 
+    # ------------------------------
     # MOTIONS
+    # ------------------------------
     elif mode == "motions":
         payload = {"prompt": text}
 
@@ -174,22 +206,23 @@ async def message_handler(update, context):
             parse_mode="Markdown"
         )
 
-        final = hf.wait_for_result(req_id)
+        # NEW
+        final = await send_progress(update, context, hf, req_id)
 
         if final.get("status") == "completed":
             await update.message.reply_video(final["video"]["url"])
         else:
-            await update.message.reply_text(f"❌ Failed: {final.get('status')}")
+            await update.message.reply_text(f"❌ Failed: {final['status']}")
 
 
 # ---------------------------
-# PHOTO (image → video)
+# PHOTO HANDLER
 # ---------------------------
 async def photo_handler(update, context):
     chat_id = update.message.chat_id
 
     if chat_id not in user_sessions or user_sessions[chat_id]["mode"] != "image2video":
-        return await update.message.reply_text("Pick Image → Video first using /start")
+        return await update.message.reply_text("Select Image → Video first using /start")
 
     file = await update.message.photo[-1].get_file()
     path = f"/tmp/{file.file_id}.jpg"
@@ -201,7 +234,7 @@ async def photo_handler(update, context):
 
 
 # ---------------------------
-# STATUS / CANCEL
+# STATUS
 # ---------------------------
 async def status_cmd(update, context):
     if len(context.args) == 0:
@@ -214,6 +247,9 @@ async def status_cmd(update, context):
     await update.message.reply_text(f"📊 Status: {data['status']}")
 
 
+# ---------------------------
+# CANCEL
+# ---------------------------
 async def cancel_cmd(update, context):
     if len(context.args) == 0:
         return await update.message.reply_text("Usage: /cancel <request_id>")
