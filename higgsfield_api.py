@@ -1,77 +1,103 @@
 import base64
-import requests
-
+import httpx
 
 class HiggsfieldAPI:
-    def __init__(self, hf_key, hf_secret):
-        self.key = hf_key
-        self.secret = hf_secret
-        self.url = "https://api.higgsfield.ai"
+    def __init__(self, hf_key: str, hf_secret: str):
+        self.base_url = "https://api.higgsfield.ai"
+        self.hf_key = hf_key
+        self.hf_secret = hf_secret
 
-    def _auth(self):
-        token = base64.b64encode(f"{self.key}:{self.secret}".encode()).decode()
-        return {"Authorization": f"Basic {token}"}
+    def _auth_headers(self):
+        token = f"{self.hf_key}:{self.hf_secret}"
+        encoded = base64.b64encode(token.encode()).decode()
+        return {
+            "Authorization": f"Basic {encoded}",
+            "Content-Type": "application/json"
+        }
 
-    def _post(self, endpoint, json):
-        return requests.post(
-            f"{self.url}{endpoint}",
-            headers=self._auth(),
-            json=json,
-            timeout=120,
-        ).json()
-
-    def _get(self, endpoint):
-        return requests.get(
-            f"{self.url}{endpoint}",
-            headers=self._auth(),
-            timeout=120,
-        ).json()
-
-    # --------------------
-    # ALL HIGGS OPTIONS
-    # --------------------
-    def dop(self, file, prompt):
-        return self._post("/v1/image2video/dop", {
-            "image_url": file,
+    # -------------------------
+    # DoP IMAGE → VIDEO
+    # -------------------------
+    async def dop(self, image_url: str, prompt: str):
+        url = f"{self.base_url}/v1/image2video/dop"
+        payload = {
+            "image_url": image_url,
             "prompt": prompt,
             "model": "dop-turbo",
             "enhance_prompt": True
-        })
+        }
 
-    def popcorn(self, file, prompt):
-        return self._post("/v1/image2video/popcorn", {
-            "image_url": file,
-            "prompt": prompt
-        })
+        async with httpx.AsyncClient(timeout=200) as client:
+            r = await client.post(url, json=payload, headers=self._auth_headers())
+            r.raise_for_status()
+            res = r.json()
 
-    def face_animate(self, file):
-        return self._post("/v1/face/animate", {
-            "image_url": file
-        })
+        job_id = res.get("job_set_id") or res.get("id")
+        return job_id, res
 
-    def face_to_video(self, file, prompt):
-        return self._post("/v1/face/2video", {
-            "image_url": file,
-            "prompt": prompt
-        })
+    # -------------------------
+    # TEXT → IMAGE
+    # -------------------------
+    async def txt2img(self, prompt: str):
+        url = f"{self.base_url}/v1/text2image"
+        payload = {
+            "prompt": prompt,
+            "model": "higgs-turbo",
+            "enhance_prompt": True
+        }
 
-    def extend_video(self, file, prompt):
-        return self._post("/v1/video/extend", {
-            "video_url": file,
-            "prompt": prompt
-        })
+        async with httpx.AsyncClient(timeout=200) as client:
+            r = await client.post(url, json=payload, headers=self._auth_headers())
+            r.raise_for_status()
+            res = r.json()
 
-    def stylize(self, file, prompt):
-        return self._post("/v1/image/stylize", {
-            "image_url": file,
-            "style_prompt": prompt
-        })
+        job_id = res.get("job_set_id") or res.get("id")
+        return job_id, res
 
-    def text_to_image(self, prompt):
-        return self._post("/v1/text2image", {"prompt": prompt})
+    # -------------------------
+    # STYLE IMAGE
+    # -------------------------
+    async def stylize(self, image_url: str, style: str):
+        url = f"{self.base_url}/v1/image/stylize"
+        payload = {
+            "image_url": image_url,
+            "style": style
+        }
 
-    def text_to_video(self, prompt):
-        return self._post("/v1/text2video", {"prompt": prompt})
+        async with httpx.AsyncClient(timeout=200) as client:
+            r = await client.post(url, json=payload, headers=self._auth_headers())
+            r.raise_for_status()
+            res = r.json()
 
-    def job_status(self, job_id):
-        return self._get(f"/v1/job-sets/{job_id}")
+        job_id = res.get("job_set_id") or res.get("id")
+        return job_id, res
+
+    # -------------------------
+    # TEXT → VIDEO (motions)
+    # -------------------------
+    async def txt2video(self, prompt: str):
+        url = f"{self.base_url}/v1/text2video"
+        payload = {
+            "prompt": prompt,
+            "model": "higgs-video",
+            "enhance_prompt": True
+        }
+
+        async with httpx.AsyncClient(timeout=200) as client:
+            r = await client.post(url, json=payload, headers=self._auth_headers())
+            r.raise_for_status()
+            res = r.json()
+
+        job_id = res.get("job_set_id") or res.get("id")
+        return job_id, res
+
+    # -------------------------
+    # JOB STATUS
+    # -------------------------
+    async def get_status(self, job_id: str):
+        url = f"{self.base_url}/v1/job-sets/{job_id}"
+
+        async with httpx.AsyncClient(timeout=200) as client:
+            r = await client.get(url, headers=self._auth_headers())
+            r.raise_for_status()
+            return r.json()
