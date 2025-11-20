@@ -10,10 +10,11 @@ def main():
 
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN missing in Railway Variables")
+
     if not HF_KEY or not HF_SECRET:
         raise RuntimeError("HF_KEY or HF_SECRET missing in Railway Variables")
 
-    print("Starting Higgsfield Cloud Bot...")
+    print("🚀 Higgsfield Bot Starting...")
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
