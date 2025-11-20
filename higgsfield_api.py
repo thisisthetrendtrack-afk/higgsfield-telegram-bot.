@@ -1,49 +1,52 @@
-import os
-import asyncio
-import base64
 import requests
+import time
 
 
 class HiggsfieldAPI:
-    def __init__(self, key, secret):
+    BASE_URL = "https://platform.higgsfield.ai"
+
+    def __init__(self, key: str, secret: str):
         self.key = key
         self.secret = secret
-        self.base = "https://cloud.higgsfield.ai/v1"
-
         self.headers = {
-            "x-api-key": self.key,
-            "x-api-secret": self.secret,
+            "Authorization": f"Key {self.key}:{self.secret}",
             "Content-Type": "application/json"
         }
 
-    # -----------------------------------------------------------
-    # DoP IMAGE → VIDEO
-    # -----------------------------------------------------------
-    def create_dop_job(self, image_url, prompt):
-        url = f"{self.base}/image2video/dop"
+    # --------------------------
+    # SUBMIT A GENERATION JOB
+    # --------------------------
+    def submit(self, model_id: str, payload: dict) -> dict:
+        """
+        Example model_id: "higgsfield-ai/soul/standard"
+        """
+        url = f"{self.BASE_URL}/{model_id}"
+        resp = requests.post(url, headers=self.headers, json=payload)
+        resp.raise_for_status()
+        return resp.json()
 
-        payload = {
-            "model": "dop",
-            "enhance_prompt": True,
-            "image": image_url,
-            "prompt": prompt
-        }
+    # --------------------------
+    # GET STATUS OF A JOB
+    # --------------------------
+    def get_status(self, request_id: str) -> dict:
+        url = f"{self.BASE_URL}/requests/{request_id}/status"
+        resp = requests.get(url, headers=self.headers)
+        resp.raise_for_status()
+        return resp.json()
 
-        try:
-            r = requests.post(url, json=payload, headers=self.headers)
-            data = r.json()
+    # --------------------------
+    # WAIT UNTIL JOB FINISHES
+    # --------------------------
+    def wait_for_result(self, request_id: str, interval=4, timeout=300):
+        elapsed = 0
+        while elapsed < timeout:
+            data = self.get_status(request_id)
+            status = data.get("status")
 
-            jobset_id = data.get("job_set_id")
-            return jobset_id, data
+            if status in ["completed", "failed", "nsfw"]:
+                return data
 
-        except Exception as e:
-            return None, {"error": str(e)}
+            time.sleep(interval)
+            elapsed += interval
 
-    # -----------------------------------------------------------
-    # GET JOB STATUS
-    # -----------------------------------------------------------
-    def get_job_status(self, job_set_id):
-        url = f"{self.base}/job-sets/{job_set_id}"
-
-        r = requests.get(url, headers=self.headers)
-        return r.json()
+        return {"status": "timeout", "request_id": request_id}
