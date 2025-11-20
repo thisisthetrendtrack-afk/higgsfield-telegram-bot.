@@ -8,9 +8,9 @@ from telegram.ext import (
     filters,
 )
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-import requests
 
 from higgsfield_api import HiggsfieldAPI
+import requests
 
 # GLOBAL SESSION MEMORY
 user_sessions = {}
@@ -21,7 +21,6 @@ user_sessions = {}
 async def start(update, context):
     keyboard = [
         [InlineKeyboardButton("🖼 Text → Image", callback_data="text2image")],
-        [InlineKeyboardButton("🎬 Text → Video (DoP)", callback_data="text2video")],
         [InlineKeyboardButton("🖼 → 🎬 Image → Video (DoP)", callback_data="image2video")],
     ]
 
@@ -47,24 +46,24 @@ async def button_handler(update, context):
 
     mode = query.data
     chat_id = query.message.chat_id
+
     user_sessions[chat_id] = {"mode": mode}
 
     if mode == "text2image":
-        await query.edit_message_text("📝 Send your *image prompt*.", parse_mode="Markdown")
-    elif mode == "text2video":
-        await query.edit_message_text("🎬 Send your *video prompt*.", parse_mode="Markdown")
+        await query.edit_message_text("📝 Send your *text prompt* for Image Generation.", parse_mode="Markdown")
+
     elif mode == "image2video":
         await query.edit_message_text("📸 Send an image first. Then send a video prompt.")
 
 # ----------------------------------------------------
-# STEP-BY-STEP LOADING
+#  STEP-BY-STEP LOADING
 # ----------------------------------------------------
 async def loading_animation(context, chat_id, message_id, stop_event):
     frames = [
         "⏳ Step 1: Request sent…",
         "🔄 Step 2: Model processing…",
-        "🎬 Step 3: Rendering video frames…",
-        "✨ Step 4: Finalizing output…"
+        "🎬 Step 3: Rendering…",
+        "✨ Step 4: Finalizing…"
     ]
     i = 0
     while not stop_event.is_set():
@@ -87,7 +86,8 @@ async def message_handler(update, context):
     text = update.message.text
 
     if chat_id not in user_sessions:
-        return await update.message.reply_text("Please choose from the menu using /start")
+        await update.message.reply_text("Please choose from the menu using /start")
+        return
 
     mode = user_sessions[chat_id]["mode"]
 
@@ -96,6 +96,7 @@ async def message_handler(update, context):
     IMAGE_MODEL = "higgsfield-ai/soul/standard"
     VIDEO_MODEL = "higgsfield-ai/dop/standard"
 
+    # Start loading animation
     loading_msg = await update.message.reply_text("⏳ Loading…")
     stop_event = asyncio.Event()
 
@@ -121,10 +122,26 @@ async def message_handler(update, context):
             await update.message.reply_text(f"❌ Failed: {final.get('status')}")
 
     # ------------------------------
-    # TEXT → VIDEO (DOP)
+    # IMAGE → VIDEO (DOP)
     # ------------------------------
-    elif mode == "text2video":
-        payload = {"prompt": text, "duration": 5}
+    elif mode == "image2video":
+        if "image" not in user_sessions[chat_id]:
+            stop_event.set()
+            await update.message.reply_text("📸 Please send an image first.")
+            return
+
+        image_path = user_sessions[chat_id]["image"]
+
+        # Upload image to web hosting
+        with open(image_path, "rb") as f:
+            upload = requests.post("https://tmpfiles.org/api/v1/upload", files={"file": f})
+        image_url = upload.json()["data"]["url"].replace("/download", "")
+
+        payload = {
+            "image_url": image_url,
+            "prompt": text,
+            "duration": 5
+        }
 
         resp = hf.submit(VIDEO_MODEL, payload)
         req_id = resp["request_id"]
@@ -138,21 +155,20 @@ async def message_handler(update, context):
             await update.message.reply_text(f"❌ Video generation failed: {final.get('status')}")
 
 # ---------------------------
-# PHOTO HANDLER (IMAGE → VIDEO)
+# PHOTO HANDLER
 # ---------------------------
 async def photo_handler(update, context):
     chat_id = update.message.chat_id
 
     if chat_id not in user_sessions or user_sessions[chat_id]["mode"] != "image2video":
-        return await update.message.reply_text("Select Image→Video first using /start")
+        await update.message.reply_text("Select Image→Video first using /start")
+        return
 
     file = await update.message.photo[-1].get_file()
-    file_path = file.file_path
+    img_path = f"/tmp/{file.file_id}.jpg"
+    await file.download_to_drive(img_path)
 
-    BOT_TOKEN = os.getenv("BOT_TOKEN")
-    image_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
-
-    user_sessions[chat_id]["image_url"] = image_url
+    user_sessions[chat_id]["image"] = img_path
     await update.message.reply_text("📌 Image saved. Now send your video prompt.")
 
 # ---------------------------
@@ -161,5 +177,6 @@ async def photo_handler(update, context):
 def register_handlers(app):
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
+
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
