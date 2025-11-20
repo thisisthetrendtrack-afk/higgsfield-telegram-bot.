@@ -95,32 +95,30 @@ async def message_handler(update, context):
 
     mode = user_sessions[chat_id].get("mode")
 
-    # Initialize API client
-    hf = HiggsfieldAPI(
-        os.getenv("HF_KEY"),
-        os.getenv("HF_SECRET")
-    )
+    hf = HiggsfieldAPI(os.getenv("HF_KEY"), os.getenv("HF_SECRET"))
 
-    # Unified Model
-    MODEL = "higgsfield-ai/soul/standard"
+    # CORRECT MODELS
+    IMAGE_MODEL = "higgsfield-ai/image/standard"
+    VIDEO_MODEL = "higgsfield-ai/soul/standard"
 
     # ------------------------------
     # TEXT → IMAGE
     # ------------------------------
     if mode == "text2image":
-        payload = {
-            "prompt": text
-        }
+        payload = {"prompt": text}
 
-        resp = hf.submit(MODEL, payload)
+        resp = hf.submit(IMAGE_MODEL, payload)
         req_id = resp["request_id"]
-        await update.message.reply_text(f"🟦 Image generation started.\nRequest ID: `{req_id}`", parse_mode="Markdown")
+
+        await update.message.reply_text(
+            f"🟦 Image generation started.\nRequest ID: `{req_id}`",
+            parse_mode="Markdown",
+        )
 
         final = hf.wait_for_result(req_id)
 
         if final.get("status") == "completed":
-            url = final["images"][0]["url"]
-            await update.message.reply_photo(url)
+            await update.message.reply_photo(final["images"][0]["url"])
         else:
             await update.message.reply_text(f"❌ Failed: {final.get('status')}")
 
@@ -128,13 +126,15 @@ async def message_handler(update, context):
     # TEXT → VIDEO (SOUL)
     # ------------------------------
     elif mode == "text2video":
-        payload = {
-            "prompt": text
-        }
+        payload = {"prompt": text}
 
-        resp = hf.submit(MODEL, payload)
+        resp = hf.submit(VIDEO_MODEL, payload)
         req_id = resp["request_id"]
-        await update.message.reply_text(f"🎬 Video generation started.\nRequest ID: `{req_id}`", parse_mode="Markdown")
+
+        await update.message.reply_text(
+            f"🎬 Video generation started.\nRequest ID: `{req_id}`",
+            parse_mode="Markdown",
+        )
 
         final = hf.wait_for_result(req_id)
 
@@ -149,9 +149,13 @@ async def message_handler(update, context):
     elif mode == "characters":
         payload = {"prompt": text}
 
-        resp = hf.submit(MODEL, payload)
+        resp = hf.submit(VIDEO_MODEL, payload)
         req_id = resp["request_id"]
-        await update.message.reply_text(f"👤 Character creation started.\nID: `{req_id}`", parse_mode="Markdown")
+
+        await update.message.reply_text(
+            f"👤 Character creation started.\nID: `{req_id}`",
+            parse_mode="Markdown",
+        )
 
         final = hf.wait_for_result(req_id)
 
@@ -166,9 +170,13 @@ async def message_handler(update, context):
     elif mode == "motions":
         payload = {"prompt": text}
 
-        resp = hf.submit(MODEL, payload)
+        resp = hf.submit(VIDEO_MODEL, payload)
         req_id = resp["request_id"]
-        await update.message.reply_text(f"💫 Motion generation started.\nID: `{req_id}`", parse_mode="Markdown")
+
+        await update.message.reply_text(
+            f"💫 Motion generation started.\nID: `{req_id}`",
+            parse_mode="Markdown",
+        )
 
         final = hf.wait_for_result(req_id)
 
@@ -178,13 +186,13 @@ async def message_handler(update, context):
             await update.message.reply_text(f"❌ Failed: {final.get('status')}")
 
 # ---------------------------
-# PHOTO HANDLER (image → video)
+# PHOTO HANDLER
 # ---------------------------
 async def photo_handler(update, context):
     chat_id = update.message.chat_id
 
     if chat_id not in user_sessions or user_sessions[chat_id]["mode"] != "image2video":
-        await update.message.reply_text("To use Image → Video, click /start and select Image2Video first.")
+        await update.message.reply_text("To use Image → Video, click /start and select Image2Video.")
         return
 
     file = await update.message.photo[-1].get_file()
@@ -207,7 +215,10 @@ async def status_cmd(update, context):
     hf = HiggsfieldAPI(os.getenv("HF_KEY"), os.getenv("HF_SECRET"))
     data = hf.get_status(req_id)
 
-    await update.message.reply_text(f"📊 Status: *{data['status']}*", parse_mode="Markdown")
+    await update.message.reply_text(
+        f"📊 Status: *{data['status']}*",
+        parse_mode="Markdown",
+    )
 
 # ---------------------------
 # CANCEL COMMAND
