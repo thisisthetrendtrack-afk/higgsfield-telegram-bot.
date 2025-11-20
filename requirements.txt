@@ -1,3 +1,18 @@
-python-telegram-bot==21.6
-requests
-python-dotenv
+# Higgsfield Telegram Bot (Railway Deployment)
+
+This bot connects to the official **Higgsfield API** and supports:
+
+- Text → Image  
+- Text → Video  
+- Image → Video  
+- Characters  
+- Motions  
+- Status  
+- Cancel  
+
+---
+
+## 🚀 Deploy to Railway
+
+### 1. Upload files to your GitHub repository  
+Upload all files:
