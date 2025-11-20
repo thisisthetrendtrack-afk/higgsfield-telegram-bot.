@@ -1,5 +1,6 @@
 import os
 import asyncio
+import time
 from telegram.ext import (
     CommandHandler,
     MessageHandler,
@@ -86,7 +87,11 @@ async def button_handler(update, context):
 # LOADING ANIMATION (4 sec updates)
 # ----------------------------------------------------
 async def loading_animation(context, chat_id, message_id, stop_event):
-    frames = ["⏳ Loading…", "🔄 Generating…", "🔃 Almost done…"]
+    frames = [
+        "⏳ Loading…",
+        "🔄 Generating…",
+        "🔃 Almost done…"
+    ]
     i = 0
     while not stop_event.is_set():
         try:
@@ -98,11 +103,10 @@ async def loading_animation(context, chat_id, message_id, stop_event):
         except:
             pass
         i += 1
-        await asyncio.sleep(4)  # every 4 seconds
-
+        await asyncio.sleep(4)
 
 # ---------------------------
-# TEXT HANDLER
+# MESSAGE HANDLER
 # ---------------------------
 async def message_handler(update, context):
     chat_id = update.message.chat_id
@@ -121,79 +125,133 @@ async def message_handler(update, context):
 
     MODEL = "higgsfield-ai/soul/standard"
 
-    # Start loading message
+    # start timer
+    start_time = time.time()
+
+    # Send loading message
     loading_msg = await update.message.reply_text("⏳ Loading…")
     stop_event = asyncio.Event()
     context.application.create_task(
         loading_animation(context, chat_id, loading_msg.message_id, stop_event)
     )
 
-    # -------------------------------------------------
+    # ------------------------------
     # TEXT → IMAGE
-    # -------------------------------------------------
+    # ------------------------------
     if mode == "text2image":
         payload = {"prompt": text}
 
         resp = hf.submit(MODEL, payload)
         req_id = resp["request_id"]
 
+        # Show request ID
+        await update.message.reply_text(f"🆔 Request ID: `{req_id}`", parse_mode="Markdown")
+
         final = hf.wait_for_result(req_id)
         stop_event.set()
 
+        # Stop loading animation message
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=loading_msg.message_id,
+            text="🔍 Checking result…"
+        )
+
         if final.get("status") == "completed":
             url = final["images"][0]["url"]
+
             await update.message.reply_photo(url)
+
+            total = round(time.time() - start_time, 2)
+            await update.message.reply_text(f"✅ Completed in *{total} sec*", parse_mode="Markdown")
+
         else:
             await update.message.reply_text(f"❌ Failed: {final.get('status')}")
 
-    # -------------------------------------------------
+    # ------------------------------
     # TEXT → VIDEO
-    # -------------------------------------------------
+    # ------------------------------
     elif mode == "text2video":
         payload = {"prompt": text}
 
         resp = hf.submit(MODEL, payload)
         req_id = resp["request_id"]
 
+        await update.message.reply_text(f"🆔 Request ID: `{req_id}`", parse_mode="Markdown")
+
         final = hf.wait_for_result(req_id)
         stop_event.set()
 
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=loading_msg.message_id,
+            text="🔍 Checking result…"
+        )
+
         if final.get("status") == "completed":
             await update.message.reply_video(final["video"]["url"])
+
+            total = round(time.time() - start_time, 2)
+            await update.message.reply_text(f"🎉 Video ready in *{total} sec*", parse_mode="Markdown")
+
         else:
             await update.message.reply_text(f"❌ Failed: {final.get('status')}")
 
-    # -------------------------------------------------
+    # ------------------------------
     # CHARACTERS
-    # -------------------------------------------------
+    # ------------------------------
     elif mode == "characters":
         payload = {"prompt": text}
 
         resp = hf.submit(MODEL, payload)
         req_id = resp["request_id"]
 
+        await update.message.reply_text(f"🆔 Request ID: `{req_id}`", parse_mode="Markdown")
+
         final = hf.wait_for_result(req_id)
         stop_event.set()
 
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=loading_msg.message_id,
+            text="🔍 Checking result…"
+        )
+
         if final.get("status") == "completed":
             await update.message.reply_photo(final["images"][0]["url"])
+
+            total = round(time.time() - start_time, 2)
+            await update.message.reply_text(f"👤 Character ready in *{total} sec*", parse_mode="Markdown")
+
         else:
             await update.message.reply_text(f"❌ Failed: {final.get('status')}")
 
-    # -------------------------------------------------
+    # ------------------------------
     # MOTIONS
-    # -------------------------------------------------
+    # ------------------------------
     elif mode == "motions":
         payload = {"prompt": text}
 
         resp = hf.submit(MODEL, payload)
         req_id = resp["request_id"]
 
+        await update.message.reply_text(f"🆔 Request ID: `{req_id}`", parse_mode="Markdown")
+
         final = hf.wait_for_result(req_id)
         stop_event.set()
 
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=loading_msg.message_id,
+            text="🔍 Checking result…"
+        )
+
         if final.get("status") == "completed":
             await update.message.reply_video(final["video"]["url"])
+
+            total = round(time.time() - start_time, 2)
+            await update.message.reply_text(f"💫 Motion ready in *{total} sec*", parse_mode="Markdown")
+
         else:
             await update.message.reply_text(f"❌ Failed: {final.get('status')}")
 
