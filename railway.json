@@ -1,9 +1,19 @@
 {
-  "$schema": "https://railway.com/railway.schema.json",
   "build": {
-    "builder": "DOCKERFILE"
+    "dockerfilePath": "Dockerfile"
   },
   "deploy": {
-    "startCommand": "python main.py"
+    "restartPolicyType": "on_failure"
+  },
+  "env": {
+    "BOT_TOKEN": {
+      "required": true
+    },
+    "HF_KEY": {
+      "required": true
+    },
+    "HF_SECRET": {
+      "required": true
+    }
   }
 }
