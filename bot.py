@@ -1,174 +1,117 @@
 import os
-import httpx
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+import logging
+import asyncio
+import requests
 from telegram.ext import (
-    ApplicationBuilder,
     CommandHandler,
-    CallbackQueryHandler,
     MessageHandler,
-    ContextTypes,
-    filters
+    filters,
 )
+from telegram import Update
+from higgsfield_api import HiggsfieldAPI
+
+logger = logging.getLogger(__name__)
 
 HF_KEY = os.getenv("HF_KEY")
 HF_SECRET = os.getenv("HF_SECRET")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-BASE_URL = "https://api.higgsfield.ai/v1"
+api = HiggsfieldAPI(HF_KEY, HF_SECRET)
 
-user_state = {}  # tracks mode per user
-
-
-# ------------------------------
-# START MENU
-# ------------------------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("🎨 Stylize Image", callback_data="stylize")],
-        [InlineKeyboardButton("🖼 Text → Image", callback_data="txt2img")],
-        [InlineKeyboardButton("🎬 Text → Video", callback_data="txt2video")],
-        [InlineKeyboardButton("📊 Check Job Status", callback_data="status")]
-    ]
-    await update.message.reply_text(
-        "Welcome to HiggsMasterBot!",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+# Track user’s uploaded images
+user_state = {}
 
 
-# ------------------------------
-# BUTTON MENU HANDLERS
-# ------------------------------
-async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-
-    if query.data == "stylize":
-        user_state[user_id] = "stylize"
-        await query.edit_message_text("Selected: stylize\nSend an image now.")
-
-    elif query.data == "txt2img":
-        user_state[user_id] = "txt2img"
-        await query.edit_message_text("Selected: txt2img\nSend your prompt.")
-
-    elif query.data == "txt2video":
-        user_state[user_id] = "txt2video"
-        await query.edit_message_text("Selected: txt2video\nSend your prompt.")
-
-    elif query.data == "status":
-        await query.edit_message_text("Send job_set_id to check status.")
-        user_state[user_id] = "status"
+# -------------------------------------------------
+# /start
+# -------------------------------------------------
+async def start(update: Update, context):
+    await update.message.reply_text("Send me a photo to begin.")
 
 
-# ------------------------------
-# MAIN PROMPT HANDLER
-# ------------------------------
-async def prompt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    mode = user_state.get(user_id)
+# -------------------------------------------------
+# PHOTO HANDLER
+# -------------------------------------------------
+async def handle_photo(update: Update, context):
+    chat_id = update.message.chat_id
+    file = await update.message.photo[-1].get_file()
 
-    if mode is None:
-        await update.message.reply_text("Choose an option first: /start")
+    # IMPORTANT FIX:
+    # Telegram gives a PUBLIC URL automatically
+    image_url = file.file_path
+
+    user_state[chat_id] = {"image_url": image_url}
+
+    await update.message.reply_text("Image received. Now send your text prompt.")
+
+
+# -------------------------------------------------
+# PROMPT HANDLER
+# -------------------------------------------------
+async def handle_prompt(update: Update, context):
+    chat_id = update.message.chat_id
+    prompt = update.message.text
+
+    if chat_id not in user_state:
+        await update.message.reply_text("Send a photo first.")
         return
 
-    # =============== TXT2IMG ===============
-    if mode == "txt2img":
-        prompt = update.message.text
-        await update.message.reply_text("Starting Text → Image …")
+    image_url = user_state[chat_id]["image_url"]
 
-        payload = {
-            "model": "flux-1-schnell",
-            "prompt": prompt
-        }
+    await update.message.reply_text("Submitting job to Higgsfield...")
 
-        async with httpx.AsyncClient() as client:
-            r = await client.post(
-                f"{BASE_URL}/image/generate",
-                json=payload,
-                headers={"x-api-key": HF_KEY}
-            )
+    # STEP 1 — create job
+    job_set_id, response = api.create_dop_job(image_url, prompt)
 
-        data = r.json()
-        if "job_set_id" in data:
-            await update.message.reply_text(f"Job submitted.\nJob Set ID: `{data['job_set_id']}`", parse_mode="Markdown")
-        else:
-            await update.message.reply_text(f"Error: {data}")
+    if not job_set_id:
+        await update.message.reply_text(f"Failed creating job.\nResponse: {response}")
+        return
 
-    # =============== TXT2VIDEO ===============
-    elif mode == "txt2video":
-        prompt = update.message.text
-        await update.message.reply_text("Starting Text → Video …")
+    await update.message.reply_text(f"Job created: {job_set_id}\nProcessing...")
 
-        payload = {
-            "model": "dop-turbo",
-            "enhance_prompt": True,
-            "prompt": prompt
-        }
-
-        async with httpx.AsyncClient() as client:
-            r = await client.post(
-                f"{BASE_URL}/image2video/dop",
-                json=payload,
-                headers={
-                    "x-api-key": HF_KEY,
-                    "x-api-secret": HF_SECRET
-                }
-            )
-
-        data = r.json()
-        if "job_set_id" in data:
-            await update.message.reply_text(f"Job submitted.\nJob Set ID: `{data['job_set_id']}`", parse_mode="Markdown")
-        else:
-            await update.message.reply_text(f"Error: {data}")
-
-    # =============== STATUS CHECK ===============
-    elif mode == "status":
-        job_id = update.message.text.strip()
-        await update.message.reply_text("Checking job status…")
-
-        async with httpx.AsyncClient() as client:
-            r = await client.get(
-                f"{BASE_URL}/job-sets/{job_id}",
-                headers={"x-api-key": HF_KEY}
-            )
-
-        data = r.json()
-        await update.message.reply_text(str(data))
-
-    # =============== STYLIZE IMAGE (IMAGE INPUT) ===============
-    elif mode == "stylize":
-        if not update.message.photo:
-            await update.message.reply_text("Send an image.")
+    # STEP 2 — poll status
+    for _ in range(45):
+        try:
+            status_data = api.get_job_status(job_set_id)
+        except Exception as e:
+            await update.message.reply_text(f"API error: {e}")
             return
 
-        file_id = update.message.photo[-1].file_id
-        file = await context.bot.get_file(file_id)
-        img_url = file.file_path
+        status = status_data.get("status")
+        video_url = None
 
-        await update.message.reply_text("Stylizing image…")
+        # Many APIs put URL in different fields
+        if "raw" in status_data and "url" in status_data["raw"]:
+            video_url = status_data["raw"]["url"]
 
-        payload = {
-            "model": "style-diffusion",
-            "image_url": img_url
-        }
+        if status == "completed" and video_url:
+            await update.message.reply_video(video_url)
+            return
 
-        async with httpx.AsyncClient() as client:
-            r = await client.post(
-                f"{BASE_URL}/image/stylize",
-                json=payload,
-                headers={"x-api-key": HF_KEY}
-            )
+        if status == "failed":
+            await update.message.reply_text("Job failed. Try again.")
+            return
 
-        data = r.json()
-        if "job_set_id" in data:
-            await update.message.reply_text(f"Job submitted.\nJob Set ID: `{data['job_set_id']}`", parse_mode="Markdown")
-        else:
-            await update.message.reply_text(f"Error: {data}")
+        await asyncio.sleep(4)
+
+    await update.message.reply_text("Still processing. Try again later.")
 
 
-# ------------------------------
-# CREATE HANDLERS
-# ------------------------------
-start_handler = CommandHandler("start", start)
-button_handler = CallbackQueryHandler(button_router)
-message_handler = MessageHandler(filters.TEXT | filters.PHOTO, prompt_handler)
+# -------------------------------------------------
+# UNKNOWN CMD
+# -------------------------------------------------
+async def unknown(update: Update, context):
+    await update.message.reply_text("Unknown command.")
+
+
+# -------------------------------------------------
+# Handler Registration (used in main.py)
+# -------------------------------------------------
+def register_handlers(app):
+
+    app.add_handler(CommandHandler("start", start))
+
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_prompt))
+
+    app.add_handler(MessageHandler(filters.COMMAND, unknown))
