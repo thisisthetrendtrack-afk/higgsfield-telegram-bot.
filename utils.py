@@ -1,31 +1,20 @@
-import aiohttp
 import os
+import aiohttp
 
+async def download_file(file_obj):
+    """
+    Downloads a Telegram file to local storage and returns its file path.
+    """
+    file_path = f"downloads/{file_obj.file_id}.jpg"
 
-async def download_file(file_url: str, local_path: str = None) -> str:
-    """
-    Download a file from a given URL and save locally.
-    """
-    if local_path is None:
-        folder = "downloads"
-        os.makedirs(folder, exist_ok=True)
-        local_path = f"{folder}/{os.path.basename(file_url)}"
+    os.makedirs("downloads", exist_ok=True)
 
     async with aiohttp.ClientSession() as session:
-        async with session.get(file_url) as resp:
+        async with session.get(file_obj.file_path) as resp:
             if resp.status != 200:
-                raise Exception(f"Failed to download file: HTTP {resp.status}")
-            data = await resp.read()
+                raise Exception("Failed to download file")
 
-    with open(local_path, "wb") as f:
-        f.write(data)
+            with open(file_path, "wb") as f:
+                f.write(await resp.read())
 
-    return local_path
-
-
-async def get_telegram_file_url(bot, file_id: str) -> str:
-    """
-    Convert Telegram file_id into a downloadable URL.
-    """
-    tg_file = await bot.get_file(file_id)
-    return tg_file.file_path
+    return file_path
