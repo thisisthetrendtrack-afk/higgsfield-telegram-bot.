@@ -21,7 +21,7 @@ user_sessions = {}
 async def start(update, context):
     keyboard = [
         [InlineKeyboardButton("🖼 Text → Image", callback_data="text2image")],
-        [InlineKeyboardButton("🎬 Text → Video (DoP)", callback_data="text2video")],
+        [InlineKeyboardButton("🎬 Text → Video (Seedance)", callback_data="text2video")],
         [InlineKeyboardButton("🖼 → 🎬 Image → Video (DoP)", callback_data="image2video")],
         [InlineKeyboardButton("👤 Characters", callback_data="characters")],
         [InlineKeyboardButton("💫 Motions", callback_data="motions")],
@@ -56,7 +56,7 @@ async def button_handler(update, context):
         await query.edit_message_text("📝 Send your *image prompt*.", parse_mode="Markdown")
 
     elif mode == "text2video":
-        await query.edit_message_text("🎬 Send your *video prompt* (DoP Model).", parse_mode="Markdown")
+        await query.edit_message_text("🎬 Send your *video prompt* (Seedance Model).", parse_mode="Markdown")
 
     elif mode == "characters":
         await query.edit_message_text("👤 Send your *character prompt*.", parse_mode="Markdown")
@@ -68,7 +68,7 @@ async def button_handler(update, context):
         await query.edit_message_text("📸 Send an image first. Then send a video prompt.")
 
 # ----------------------------------------------------
-#  STEP-BY-STEP LOADING
+# STEP-BY-STEP LOADING
 # ----------------------------------------------------
 async def loading_animation(context, chat_id, message_id, stop_event):
     frames = [
@@ -106,7 +106,7 @@ async def message_handler(update, context):
     hf = HiggsfieldAPI(os.getenv("HF_KEY"), os.getenv("HF_SECRET"))
 
     IMAGE_MODEL = "higgsfield-ai/soul/standard"
-    VIDEO_MODEL = "higgsfield-ai/dop/standard"
+    VIDEO_MODEL = "bytedance/seedance/v1/pro/text-to-video"    # FIXED ✔
 
     # Start loading animation
     loading_msg = await update.message.reply_text("⏳ Loading…")
@@ -134,7 +134,7 @@ async def message_handler(update, context):
             await update.message.reply_text(f"❌ Failed: {final.get('status')}")
 
     # ------------------------------
-    # TEXT → VIDEO (DOP)
+    # TEXT → VIDEO (SEEDANCE FIXED)
     # ------------------------------
     elif mode == "text2video":
         payload = {
