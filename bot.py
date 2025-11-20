@@ -1,118 +1,166 @@
+import os
 import asyncio
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder,
     CommandHandler,
     MessageHandler,
-    CallbackQueryHandler,
     ContextTypes,
-    filters
+    filters,
+    CallbackQueryHandler,
 )
-
-from utils import download_file
 from higgsfield_api import HiggsfieldAPI
 
-# Store user mode
-user_mode = {}
+HF = HiggsfieldAPI(
+    hf_key=os.getenv("HF_KEY"),
+    hf_secret=os.getenv("HF_SECRET"),
+)
 
-# ---------------------------
-# /start command
-# ---------------------------
+USER_STATE = {}
+
+
+# -----------------------------
+#        MAIN MENU
+# -----------------------------
+def menu_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎬 DoP Image → Video", callback_data="dop")],
+        [InlineKeyboardButton("🍿 Popcorn I2V", callback_data="popcorn")],
+        [InlineKeyboardButton("🧑 Face Animate", callback_data="face_animate")],
+        [InlineKeyboardButton("👤 Face → Video", callback_data="face2video")],
+        [InlineKeyboardButton("⏩ Extend Video", callback_data="extend")],
+        [InlineKeyboardButton("🎨 Stylize Image", callback_data="stylize")],
+        [InlineKeyboardButton("🖼 Text → Image", callback_data="txt2img")],
+        [InlineKeyboardButton("🎞 Text → Video", callback_data="txt2video")],
+        [InlineKeyboardButton("📊 Check Job Status", callback_data="status")],
+    ])
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        ["🎨 Stylize Image"],
-        ["🖼 Text → Image"],
-        ["🎬 Text → Video"],
-        ["📊 Check Job Status"],
-    ]
-
     await update.message.reply_text(
-        "Choose an option:",
-        reply_markup={"keyboard": keyboard, "resize_keyboard": True}
+        "Welcome to Higgsfield Cloud Bot.\nChoose an option:",
+        reply_markup=menu_keyboard(),
     )
 
 
-# ---------------------------
-# User selects a mode
-# ---------------------------
-async def mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    mode = update.message.text
-    user_mode[update.message.from_user.id] = mode
-    await update.message.reply_text("Selected: " + mode + "\nNow send your input text or photo.")
+# -----------------------------
+#      CALLBACK BUTTONS
+# -----------------------------
+async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    mode = query.data
+    chat = query.message.chat_id
+
+    USER_STATE[chat] = {"mode": mode}
+
+    await query.edit_message_text(f"Selected: {mode}\nNow send input file or prompt.")
 
 
-# ---------------------------
-# Handle ALL messages in selected mode
-# ---------------------------
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# -----------------------------
+#      PHOTO / VIDEO INPUT
+# -----------------------------
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.message.chat_id
 
-    api: HiggsfieldAPI = context.bot_data["hf"]
-    user_id = update.message.from_user.id
-    mode = user_mode.get(user_id)
+    file = await update.message.photo[-1].get_file()
+    local = f"/tmp/{file.file_unique_id}.jpg"
+    await file.download_to_drive(local)
 
-    if not mode:
-        await update.message.reply_text("Please choose an option using /start first.")
+    USER_STATE[chat]["file"] = local
+
+    await update.message.reply_text("Photo saved. Now send your prompt.")
+
+
+async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.message.chat_id
+
+    file = await update.message.video.get_file()
+    local = f"/tmp/{file.file_unique_id}.mp4"
+    await file.download_to_drive(local)
+
+    USER_STATE[chat]["file"] = local
+
+    await update.message.reply_text("Video saved. Now send your prompt.")
+
+
+# -----------------------------
+#      TEXT INPUT (PROMPTS)
+# -----------------------------
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.message.chat_id
+
+    if chat not in USER_STATE:
+        await update.message.reply_text("Select an option first: /start")
         return
 
-    # ---------------------------
-    # 1. TEXT → IMAGE
-    # ---------------------------
-    if mode.startswith("🖼"):
-        prompt = update.message.text
-        await update.message.reply_text("Creating image... wait...")
+    mode = USER_STATE[chat]["mode"]
+    prompt = update.message.text
 
-        job_id, data = await api.txt2img(prompt)
-        await update.message.reply_text(f"Job created: {job_id}")
+    await update.message.reply_text(f"Processing {mode}...")
+
+    # Run correct higgsfield API
+    if mode == "dop":
+        job = HF.dop(USER_STATE[chat]["file"], prompt)
+
+    elif mode == "popcorn":
+        job = HF.popcorn(USER_STATE[chat]["file"], prompt)
+
+    elif mode == "face_animate":
+        job = HF.face_animate(USER_STATE[chat]["file"])
+
+    elif mode == "face2video":
+        job = HF.face_to_video(USER_STATE[chat]["file"], prompt)
+
+    elif mode == "extend":
+        job = HF.extend_video(USER_STATE[chat]["file"], prompt)
+
+    elif mode == "stylize":
+        job = HF.stylize(USER_STATE[chat]["file"], prompt)
+
+    elif mode == "txt2img":
+        job = HF.text_to_image(prompt)
+
+    elif mode == "txt2video":
+        job = HF.text_to_video(prompt)
+
+    elif mode == "status":
+        job = HF.job_status(prompt)
+        await update.message.reply_text(str(job))
         return
 
-    # ---------------------------
-    # 2. TEXT → VIDEO
-    # ---------------------------
-    if mode.startswith("🎬"):
-        prompt = update.message.text
-        await update.message.reply_text("Creating video... wait...")
-
-        job_id, data = await api.txt2video(prompt)
-        await update.message.reply_text(f"Job created: {job_id}")
+    else:
+        await update.message.reply_text("Unknown mode.")
         return
 
-    # ---------------------------
-    # 3. CHECK JOB STATUS
-    # ---------------------------
-    if mode.startswith("📊"):
-        job_id = update.message.text
-        await update.message.reply_text("Checking status...")
+    job_id = job.get("job_set_id")
 
-        status = await api.get_job_status(job_id)
-        await update.message.reply_text(str(status))
-        return
+    await update.message.reply_text(f"Job started: {job_id}\nChecking status...")
 
-    # ---------------------------
-    # 4. STYLIZE IMAGE
-    # ---------------------------
-    if mode.startswith("🎨"):
-        if not update.message.photo:
-            await update.message.reply_text("Send a photo to stylize.")
+    # Polling
+    for _ in range(40):
+        status = HF.job_status(job_id)
+        state = status.get("state")
+        output = status.get("output_url")
+
+        if state == "completed" and output:
+            if output.endswith(".mp4"):
+                await update.message.reply_video(video=output)
+            else:
+                await update.message.reply_photo(photo=output)
             return
 
-        file_id = update.message.photo[-1].file_id
+        await asyncio.sleep(4)
 
-        # USE UPDATED utils.py FUNCTION
-        local_path = await download_file(context.bot, file_id)
-
-        await update.message.reply_text("Stylizing your image...")
-
-        job_id, data = await api.stylize(local_path)
-        await update.message.reply_text(f"Job created: {job_id}")
-        return
+    await update.message.reply_text("Still processing...")
 
 
-# ---------------------------
-# Register all handlers (called from main.py)
-# ---------------------------
-def register_handlers(app, hf_api):
-    app.bot_data["hf"] = hf_api
-
+# -----------------------------
+#      REGISTER HANDLERS
+# -----------------------------
+def register_handlers(app):
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.Regex("^(🎨|🖼|🎬|📊).*"), mode_handler))
-    app.add_handler(MessageHandler(filters.ALL, message_handler))
+    app.add_handler(CallbackQueryHandler(menu_callback))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.VIDEO, handle_video))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
