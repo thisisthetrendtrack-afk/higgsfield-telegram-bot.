@@ -1,119 +1,154 @@
 import os
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+import asyncio
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import (
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    filters,
+)
+from utils import download_file
 
-from higgsfield_api import txt2img, image2image, dop_video, check_status
+user_mode = {}  # saves what user selected
 
-# Per-user mode memory
-user_mode = {}
-
-# Start command
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("🎨 Stylize Image", callback_data="i2i")],
+# -----------------------
+# MAIN MENU
+# -----------------------
+def main_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎨 Stylize Image", callback_data="stylize")],
         [InlineKeyboardButton("🖼 Text → Image", callback_data="txt2img")],
-        [InlineKeyboardButton("🎬 Text → Video", callback_data="txt2vid")],
-        [InlineKeyboardButton("📊 Check Job Status", callback_data="status")],
-    ]
+        [InlineKeyboardButton("🎞 Text → Video", callback_data="txt2video")],
+        [InlineKeyboardButton("📊 Check Job Status", callback_data="status")]
+    ])
 
+# -----------------------
+# /start
+# -----------------------
+async def start(update, context):
     await update.message.reply_text(
-        "Choose an option:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        "Welcome to HiggsMasterBot!",
+        reply_markup=main_menu()
     )
 
-# Handle menu choice
-async def menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# -----------------------
+# MENU SELECT
+# -----------------------
+async def menu_press(update, context):
     query = update.callback_query
     await query.answer()
+    user_mode[query.from_user.id] = query.data
+    await query.message.reply_text(f"Selected: {query.data}\nNow send input file or prompt.")
 
-    mode = query.data
-    chat = query.message.chat_id
+# -----------------------
+# HANDLE MESSAGES
+# -----------------------
+async def handle_message(update, context):
+    chat_id = update.message.from_user.id
+    mode = user_mode.get(chat_id, None)
 
-    user_mode[chat] = mode
-    await query.edit_message_text(f"Selected: {mode}\nNow send input file or prompt.")
+    if not mode:
+        await update.message.reply_text("Choose an option:", reply_markup=main_menu())
+        return
 
-# Handle user message
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.message.chat_id
-    text = update.message.text
-    photo = update.message.photo
+    hf = context.bot_data["hf_api"]
 
-    if chat not in user_mode:
-        return await update.message.reply_text("Use /start to choose an option.")
-
-    mode = user_mode[chat]
-
+    # -----------------------
     # TEXT → IMAGE
+    # -----------------------
     if mode == "txt2img":
+        prompt = update.message.text
         await update.message.reply_text("Processing txt2img...")
-        job = await txt2img(text)
-        if not job:
-            return await update.message.reply_text("API Error.")
-        await poll_job(update, job)
 
-    # IMAGE → IMAGE
-    elif mode == "i2i":
-        if not photo:
-            return await update.message.reply_text("Send an image.")
-        file_id = photo[-1].file_id
-        image_url = await update.message.get_bot().get_file(file_id)
-        await update.message.reply_text("Processing image2image...")
-        job = await image2image(image_url.file_path)
-        if not job:
-            return await update.message.reply_text("API Error.")
-        await poll_job(update, job)
+        job, _ = await hf.txt2img(prompt)
+        await poll_job_and_return(update, context, job)
+        return
 
-    # TEXT → VIDEO (DOP)
-    elif mode == "txt2vid":
-        await update.message.reply_text("Creating DoP video… please wait.")
-        job = await dop_video(prompt=text)
-        if not job:
-            return await update.message.reply_text("API Error.")
-        await poll_job(update, job)
+    # -----------------------
+    # TEXT → VIDEO
+    # -----------------------
+    if mode == "txt2video":
+        prompt = update.message.text
+        await update.message.reply_text("Processing text2video...")
 
-    # CHECK STATUS
-    elif mode == "status":
-        await update.message.reply_text("Checking job…")
-        job = await check_status(text)
-        if not job:
-            return await update.message.reply_text("Job not found.")
-        await poll_job(update, job)
+        job, _ = await hf.txt2video(prompt)
+        await poll_job_and_return(update, context, job)
+        return
 
+    # -----------------------
+    # STATUS CHECK
+    # -----------------------
+    if mode == "status":
+        job_id = update.message.text.strip()
+        status = await hf.get_status(job_id)
+        await update.message.reply_text(str(status))
+        return
 
-# Poll job status
-async def poll_job(update: Update, job):
-    job_id = job.get("job_set_id")
-    if not job_id:
-        return await update.message.reply_text("Invalid job response.")
+# -----------------------
+# HANDLE PHOTO INPUT
+# -----------------------
+async def handle_photo(update, context):
+    chat_id = update.message.from_user.id
+    mode = user_mode.get(chat_id, None)
 
-    await update.message.reply_text(f"Job ID: {job_id}\nPolling…")
+    if not mode:
+        await update.message.reply_text("Choose an option:", reply_markup=main_menu())
+        return
 
-    import asyncio
-    while True:
-        await asyncio.sleep(3)
-        result = await check_status(job_id)
+    hf = context.bot_data["hf_api"]
+    file = await update.message.photo[-1].get_file()
+    image_path = await download_file(file)
+    image_url = await context.bot_data["file_uploader"](image_path)
 
-        status = result.get("status")
-        if status == "completed":
-            media_url = result["result"]["url"]
-            await update.message.reply_text("Done!")
-            return await update.message.reply_video(media_url)
+    if mode == "stylize":
+        await update.message.reply_text("Send style prompt (ex: anime, cyberpunk)")
+        user_mode[chat_id] = f"stylize|{image_url}"
+        return
 
-        if status == "failed":
-            return await update.message.reply_text("Job failed.")
+    if mode.startswith("stylize|"):
+        style = update.message.text
+        _, img = mode.split("|")
 
-# Build App
-def run_bot():
-    token = os.getenv("TELEGRAM_TOKEN")
-    app = ApplicationBuilder().token(token).build()
+        job, _ = await hf.stylize(img, style)
+        await poll_job_and_return(update, context, job)
+        return
 
+    # DoP Image → Video
+    if mode == "dop":
+        text = update.message.caption or "animate"
+        job, _ = await hf.dop(image_url, text)
+        await poll_job_and_return(update, context, job)
+        return
+
+# -----------------------
+# POLLING SYSTEM
+# -----------------------
+async def poll_job_and_return(update, context, job_id):
+    hf = context.bot_data["hf_api"]
+
+    for _ in range(45):
+        data = await hf.get_status(job_id)
+        status = data.get("status")
+        outputs = data.get("outputs", [])
+
+        if status == "completed" and outputs:
+            url = outputs[0]["url"]
+
+            if url.endswith(".mp4"):
+                await update.message.reply_video(url)
+            else:
+                await update.message.reply_photo(url)
+            return
+
+        await asyncio.sleep(4)
+
+    await update.message.reply_text("Job still processing, try again later.")
+
+# -----------------------
+# REGISTER HANDLERS
+# -----------------------
+def register_handlers(app):
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(menu_button))
-    app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_message))
-
-    print("BOT RUNNING...")
-    app.run_polling()
-
-
-if __name__ == "__main__":
-    run_bot()
+    app.add_handler(CallbackQueryHandler(menu_press))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.TEXT, handle_message))
