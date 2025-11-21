@@ -132,6 +132,7 @@ async def message_handler(update, context):
 
         image_path = user_sessions[chat_id]["image"]
 
+        # Upload image to temporary hosting
         with open(image_path, "rb") as f:
             upload = requests.post("https://tmpfiles.org/api/v1/upload", files={"file": f})
 
@@ -149,9 +150,17 @@ async def message_handler(update, context):
         final = hf.wait_for_result(req_id)
         stop_event.set()
 
-        # ✅ FIXED LINE HERE ONLY
+        print("FINAL VIDEO RESPONSE:", final)  # Debug
+
         if final.get("status") == "completed":
-            await update.message.reply_video(final["videos"][0]["url"])
+
+            # FIXED: use "videos" array instead of "video"
+            if "videos" in final and len(final["videos"]) > 0:
+                video_url = final["videos"][0]["url"]
+                await update.message.reply_video(video_url)
+            else:
+                await update.message.reply_text("❌ Completed but no video URL returned.")
+
         else:
             await update.message.reply_text(f"❌ Video generation failed: {final.get('status')}")
 
