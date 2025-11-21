@@ -1,16 +1,15 @@
 import os
 import asyncio
-import requests
 from telegram.ext import (
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
-    ApplicationBuilder,
     filters,
 )
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
 
 from higgsfield_api import HiggsfieldAPI
+import requests
 
 # GLOBAL SESSION MEMORY
 user_sessions = {}
@@ -37,9 +36,10 @@ async def start(update, context):
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
-# ---------------------------
+
+# ----------------------------------------------------
 # BUTTON HANDLER
-# ---------------------------
+# ----------------------------------------------------
 async def button_handler(update, context):
     query = update.callback_query
     await query.answer()
@@ -50,61 +50,33 @@ async def button_handler(update, context):
     user_sessions[chat_id] = {"mode": mode}
 
     if mode == "text2image":
-        await query.edit_message_text("📝 Send your *text prompt* for Image Generation.", parse_mode="Markdown")
+        await query.edit_message_text(
+            "📝 Send your *text prompt* for Image Generation.",
+            parse_mode="Markdown"
+        )
 
     elif mode == "image2video":
-        await query.edit_message_text("📸 Send an image first. Then send a video prompt.")
+        await query.edit_message_text(
+            "📸 Send an image first. Then send a video prompt."
+        )
 
-# ---------------------------
-# STEP-BY-STEP LOADING
-# ---------------------------
-async def loading_animation(context, chat_id, message_id, stop_event):
-    frames = [
-        "⏳ Step 1: Request sent…",
-        "🔄 Step 2: Model processing…",
-        "🎬 Step 3: Rendering…",
-        "✨ Step 4: Finalizing…"
-    ]
-    i = 0
 
-    while not stop_event.is_set():
-        try:
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=frames[i % len(frames)]
-            )
-        except:
-            pass
-
-        i += 1
-        await asyncio.sleep(4)
-
-# ---------------------------
+# ----------------------------------------------------
 # TEXT HANDLER
-# ---------------------------
+# ----------------------------------------------------
 async def message_handler(update, context):
     chat_id = update.message.chat_id
     text = update.message.text
 
     if chat_id not in user_sessions:
-        await update.message.reply_text("Please choose from the menu using /start")
-        return
+        return await update.message.reply_text("Please choose from menu using /start")
 
     mode = user_sessions[chat_id]["mode"]
 
     hf = HiggsfieldAPI(os.getenv("HF_KEY"), os.getenv("HF_SECRET"))
 
     IMAGE_MODEL = "higgsfield-ai/soul/standard"
-    VIDEO_MODEL = "higgsfield-ai/dop/standard"   # ✔ FIXED MODEL
-
-    # Start loading animation
-    loading_msg = await update.message.reply_text("⏳ Loading…")
-    stop_event = asyncio.Event()
-
-    context.application.create_task(
-        loading_animation(context, chat_id, loading_msg.message_id, stop_event)
-    )
+    VIDEO_MODEL = "higgsfield-ai/dop/standard"
 
     # ------------------------------
     # TEXT → IMAGE
@@ -116,35 +88,30 @@ async def message_handler(update, context):
         req_id = resp["request_id"]
 
         final = hf.wait_for_result(req_id)
-        stop_event.set()
 
         if final.get("status") == "completed":
             await update.message.reply_photo(final["images"][0]["url"])
         else:
-            await update.message.reply_text(f"❌ Failed: {final.get('status')}")
+            await update.message.reply_text("❌ Failed: " + final.get("status", ""))
 
     # ------------------------------
-    # IMAGE → VIDEO (DOP)
+    # IMAGE → VIDEO (Fixed uploader)
     # ------------------------------
     elif mode == "image2video":
 
         if "image" not in user_sessions[chat_id]:
-            stop_event.set()
-            await update.message.reply_text("📸 Please send an image first.")
-            return
+            return await update.message.reply_text("📸 Please send an image first.")
 
         image_path = user_sessions[chat_id]["image"]
 
-        # UPLOAD TO FILE.IO (working)
+        # ---- FIXED UPLOADER (file.io direct link) ----
         with open(image_path, "rb") as f:
-            up = requests.post("https://file.io/?expires=1w", files={"file": f})
+            upload = requests.post("https://file.io", files={"file": f})
 
-        if up.status_code != 200:
-            stop_event.set()
-            await update.message.reply_text("❌ Image upload failed. Try again.")
-            return
+        image_url = upload.json().get("link")
 
-        image_url = up.json().get("link")  # ✔ correct field
+        if not image_url:
+            return await update.message.reply_text("❌ Upload failed. Try again.")
 
         payload = {
             "image_url": image_url,
@@ -156,22 +123,21 @@ async def message_handler(update, context):
         req_id = resp["request_id"]
 
         final = hf.wait_for_result(req_id)
-        stop_event.set()
 
         if final.get("status") == "completed":
             await update.message.reply_video(final["video"]["url"])
         else:
-            await update.message.reply_text(f"❌ Video generation failed: {final.get('status')}")
+            await update.message.reply_text("❌ Video generation failed: " + final.get("status", ""))
 
-# ---------------------------
-# PHOTO HANDLER
-# ---------------------------
+
+# ----------------------------------------------------
+# PHOTO HANDLER (store image)
+# ----------------------------------------------------
 async def photo_handler(update, context):
     chat_id = update.message.chat_id
 
     if chat_id not in user_sessions or user_sessions[chat_id]["mode"] != "image2video":
-        await update.message.reply_text("Select Image→Video first using /start")
-        return
+        return await update.message.reply_text("Select Image→Video first using /start")
 
     file = await update.message.photo[-1].get_file()
     img_path = f"/tmp/{file.file_id}.jpg"
@@ -180,9 +146,10 @@ async def photo_handler(update, context):
     user_sessions[chat_id]["image"] = img_path
     await update.message.reply_text("📌 Image saved. Now send your video prompt.")
 
-# ---------------------------
+
+# ----------------------------------------------------
 # REGISTER HANDLERS
-# ---------------------------
+# ----------------------------------------------------
 def register_handlers(app):
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
