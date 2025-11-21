@@ -1,5 +1,6 @@
 import os
 import asyncio
+import requests
 from telegram.ext import (
     CommandHandler,
     MessageHandler,
@@ -10,7 +11,6 @@ from telegram.ext import (
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
 
 from higgsfield_api import HiggsfieldAPI
-import requests
 
 # GLOBAL SESSION MEMORY
 user_sessions = {}
@@ -55,9 +55,9 @@ async def button_handler(update, context):
     elif mode == "image2video":
         await query.edit_message_text("📸 Send an image first. Then send a video prompt.")
 
-# ----------------------------------------------------
-#  STEP-BY-STEP LOADING
-# ----------------------------------------------------
+# ---------------------------
+# STEP-BY-STEP LOADING
+# ---------------------------
 async def loading_animation(context, chat_id, message_id, stop_event):
     frames = [
         "⏳ Step 1: Request sent…",
@@ -66,6 +66,7 @@ async def loading_animation(context, chat_id, message_id, stop_event):
         "✨ Step 4: Finalizing…"
     ]
     i = 0
+
     while not stop_event.is_set():
         try:
             await context.bot.edit_message_text(
@@ -75,6 +76,7 @@ async def loading_animation(context, chat_id, message_id, stop_event):
             )
         except:
             pass
+
         i += 1
         await asyncio.sleep(4)
 
@@ -94,7 +96,7 @@ async def message_handler(update, context):
     hf = HiggsfieldAPI(os.getenv("HF_KEY"), os.getenv("HF_SECRET"))
 
     IMAGE_MODEL = "higgsfield-ai/soul/standard"
-    VIDEO_MODEL = "higgsfield-ai/dop/preview"
+    VIDEO_MODEL = "higgsfield-ai/dop/standard"   # ✔ FIXED MODEL
 
     # Start loading animation
     loading_msg = await update.message.reply_text("⏳ Loading…")
@@ -122,9 +124,10 @@ async def message_handler(update, context):
             await update.message.reply_text(f"❌ Failed: {final.get('status')}")
 
     # ------------------------------
-    # IMAGE → VIDEO (DoP)
+    # IMAGE → VIDEO (DOP)
     # ------------------------------
     elif mode == "image2video":
+
         if "image" not in user_sessions[chat_id]:
             stop_event.set()
             await update.message.reply_text("📸 Please send an image first.")
@@ -132,11 +135,16 @@ async def message_handler(update, context):
 
         image_path = user_sessions[chat_id]["image"]
 
-        # Upload image to temporary hosting
+        # UPLOAD TO FILE.IO (working)
         with open(image_path, "rb") as f:
-            upload = requests.post("https://tmpfiles.org/api/v1/upload", files={"file": f})
+            up = requests.post("https://file.io/?expires=1w", files={"file": f})
 
-        image_url = upload.json()["data"]["url"].replace("/download", "")
+        if up.status_code != 200:
+            stop_event.set()
+            await update.message.reply_text("❌ Image upload failed. Try again.")
+            return
+
+        image_url = up.json().get("link")  # ✔ correct field
 
         payload = {
             "image_url": image_url,
@@ -150,17 +158,8 @@ async def message_handler(update, context):
         final = hf.wait_for_result(req_id)
         stop_event.set()
 
-        print("FINAL VIDEO RESPONSE:", final)  # Debug
-
         if final.get("status") == "completed":
-
-            # FIXED: use "videos" array instead of "video"
-            if "videos" in final and len(final["videos"]) > 0:
-                video_url = final["videos"][0]["url"]
-                await update.message.reply_video(video_url)
-            else:
-                await update.message.reply_text("❌ Completed but no video URL returned.")
-
+            await update.message.reply_video(final["video"]["url"])
         else:
             await update.message.reply_text(f"❌ Video generation failed: {final.get('status')}")
 
