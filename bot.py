@@ -15,14 +15,21 @@ import requests
 # GLOBAL SESSION MEMORY
 user_sessions = {}
 
+# SIMPLE USAGE LIMIT
+GEN_LIMIT = 2          # 🔢 max images per user
+user_usage = {}        # chat_id -> count
+
 
 # ---------------------------
 # START COMMAND
 # ---------------------------
 async def start(update, context):
+    chat_id = update.message.chat_id
     keyboard = [
         [InlineKeyboardButton("🖼 Text → Image", callback_data="text2image")],
     ]
+
+    used = user_usage.get(chat_id, 0)
 
     welcome_text = (
         "🤖 *Welcome to HiggsMasterBot*\n"
@@ -30,6 +37,8 @@ async def start(update, context):
         "👤 Bot by @honeyhoney44\n"
         "📢 *Please subscribe to our channel:* @HiggsMasterBot\n"
         "You will receive high-quality prompts, updates and new features there.\n\n"
+        "⚠️ Free limit: *2 images per account*\n"
+        f"Usage: *{used}/{GEN_LIMIT}* images used.\n\n"
         "✨ *Example prompts:*\n"
         "• Cat riding a bicycle on the road\n"
         "• Beautiful sunset over the ocean\n"
@@ -59,7 +68,9 @@ async def button_handler(update, context):
 
     if mode == "text2image":
         await query.edit_message_text(
-            "📝 Send your *text prompt* for Image Generation.", parse_mode="Markdown"
+            "📝 Send your *text prompt* for Image Generation.\n\n"
+            f"⚠️ You can generate *{GEN_LIMIT}* free images per account.",
+            parse_mode="Markdown",
         )
 
 
@@ -100,6 +111,17 @@ async def message_handler(update, context):
 
     mode = user_sessions[chat_id]["mode"]
 
+    # 🔒 CHECK LIMIT *BEFORE* CALLING API OR STARTING LOADER
+    if mode == "text2image":
+        used = user_usage.get(chat_id, 0)
+        if used >= GEN_LIMIT:
+            await update.message.reply_text(
+                "❌ You have reached your free limit of 2 images.\n\n"
+                "📢 Please subscribe to @HiggsMasterBot channel for prompts and updates.\n"
+                "If you need more images, contact @honeyhoney44."
+            )
+            return
+
     hf = HiggsfieldAPI(os.getenv("HF_KEY"), os.getenv("HF_SECRET"))
     IMAGE_MODEL = "higgsfield-ai/soul/standard"
 
@@ -124,8 +146,14 @@ async def message_handler(update, context):
         stop_event.set()
 
         if final.get("status") == "completed":
+            # count this successful generation
+            user_usage[chat_id] = user_usage.get(chat_id, 0) + 1
+
             await update.message.reply_photo(final["images"][0]["url"])
-            await update.message.reply_text("✅ Image generated successfully.")
+            await update.message.reply_text(
+                "✅ Image generated successfully.\n"
+                f"Usage: {user_usage[chat_id]}/{GEN_LIMIT} images used."
+            )
         else:
             await update.message.reply_text(f"❌ Failed: {final.get('status')}")
 
