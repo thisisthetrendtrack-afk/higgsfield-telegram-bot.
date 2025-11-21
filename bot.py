@@ -1,6 +1,8 @@
 import os
+import uuid
+import requests
 import asyncio
-import boto3
+
 from telegram.ext import (
     CommandHandler,
     MessageHandler,
@@ -11,178 +13,186 @@ from telegram.ext import (
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
 
 from higgsfield_api import HiggsfieldAPI
-import requests
 
-# ---------------------------
-# CLOUDLFARE R2 CONFIG
-# ---------------------------
-R2_ENDPOINT = "https://cf35bbda8be20eaa0b511c5171174ff2.r2.cloudflarestorage.com"
-R2_BUCKET = "higgs-image"
-R2_ACCESS_KEY = "6a1ffdbb0a5a5b9f8e94468a9cebab74"
-R2_SECRET_KEY = "7949fc22df6c16062ece0f9b65be40d92d44c46d09f1b4fb4db8e00a534efa38"
-
-s3 = boto3.client(
-    "s3",
-    endpoint_url=R2_ENDPOINT,
-    aws_access_key_id=R2_ACCESS_KEY,
-    aws_secret_access_key=R2_SECRET_KEY,
-)
-
-# ---------------------------
-# ADMIN + USER LIMITS
-# ---------------------------
+# =====================================================
+# CONFIG
+# =====================================================
 ADMIN_ID = 7872634386
-user_usage = {}  # track generation count
-MAX_GEN = 2       # normal user limit
+BUCKET_BASE = "https://pub-8bf9b7d855d54c82a736b3d813276b48.r2.dev/higgs-image"
 
-# ---------------------------
-# SESSION MEMORY
-# ---------------------------
+HF_KEY = os.getenv("HF_KEY")
+HF_SECRET = os.getenv("HF_SECRET")
+
 user_sessions = {}
+usage_count = {}
 
-# ---------------------------
+# =====================================================
 # START
-# ---------------------------
+# =====================================================
 async def start(update, context):
     keyboard = [
         [InlineKeyboardButton("🖼 Text → Image", callback_data="text2image")],
         [InlineKeyboardButton("🖼 → 🎬 Image → Video", callback_data="image2video")],
     ]
 
-    msg = (
+    welcome = (
         "🤖 *Welcome to Higgsfield AI Bot*\n"
-        "⚡ Powered by Cloudflare R2 hosting\n"
-        "🧑‍💻 Bot by @honeyhoney44\n\n"
-        "You have *2 free generations*. Admin has unlimited.\n"
-        "Please select an option below."
+        "⚡ Create Images and Videos using official Higgsfield Cloud.\n\n"
+        "📢 For advanced prompts, subscribe @HiggsMasterBot\n"
+        "🧪 Free users: 2 generations\n"
+        "👑 Admin: Unlimited\n\n"
+        "Select an option below."
     )
 
     await update.message.reply_text(
-        msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
+        welcome, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-# ---------------------------
-# BUTTON HANDLER
-# ---------------------------
-async def button_handler(update, context):
-    query = update.callback_query
-    await query.answer()
 
-    mode = query.data
-    chat_id = query.message.chat_id
+# =====================================================
+# MENU BUTTON HANDLER
+# =====================================================
+async def button_handler(update, context):
+    q = update.callback_query
+    await q.answer()
+
+    mode = q.data
+    chat_id = q.message.chat_id
 
     user_sessions[chat_id] = {"mode": mode}
 
     if mode == "text2image":
-        await query.edit_message_text("📝 Send your text prompt for Image Generation.")
+        await q.edit_message_text("📝 Send your *image prompt*.", parse_mode="Markdown")
 
     elif mode == "image2video":
-        await query.edit_message_text("📸 Send an image first, then send your video prompt.")
+        await q.edit_message_text("📸 Send an image. Then send video prompt.")
 
-# ---------------------------
-# UPLOAD TO CLOUDFLARE R2
-# ---------------------------
+
+# =====================================================
+# LIMIT SYSTEM
+# =====================================================
+def check_limit(user_id):
+    if user_id == ADMIN_ID:
+        return True
+
+    if user_id not in usage_count:
+        usage_count[user_id] = 0
+
+    return usage_count[user_id] < 2
+
+
+def increase_limit(user_id):
+    if user_id != ADMIN_ID:
+        usage_count[user_id] += 1
+
+
+# =====================================================
+# R2 UPLOAD
+# =====================================================
 def upload_to_r2(local_path):
-    file_name = os.path.basename(local_path)
+    file_name = f"{uuid.uuid4()}.jpg"
+    url = f"{BUCKET_BASE}/{file_name}"
 
-    s3.upload_file(
-        local_path,
-        R2_BUCKET,
-        file_name,
-        ExtraArgs={"ContentType": "image/jpeg"}
-    )
+    headers = {
+        "Content-Type": "application/octet-stream",
+        "x-amz-acl": "public-read"
+    }
 
-    return f"{R2_ENDPOINT}/{R2_BUCKET}/{file_name}"
+    with open(local_path, "rb") as f:
+        resp = requests.put(url, data=f, headers=headers)
 
-# ---------------------------
+    if resp.status_code in [200, 201]:
+        return url
+
+    print("R2 Upload Error:", resp.text)
+    return None
+
+
+# =====================================================
 # TEXT HANDLER
-# ---------------------------
+# =====================================================
 async def message_handler(update, context):
     chat_id = update.message.chat_id
     text = update.message.text
 
-    # Log every prompt to admin
-    if chat_id != ADMIN_ID:
-        await context.bot.send_message(
-            ADMIN_ID, f"📩 User `{chat_id}` prompt:\n{text}"
-        )
+    # Log to admin
+    await context.bot.send_message(ADMIN_ID, f"User {chat_id} prompt: {text}")
 
-    # User must pick menu
     if chat_id not in user_sessions:
-        await update.message.reply_text("Please choose from menu using /start")
+        await update.message.reply_text("Please select from menu using /start")
         return
 
-    # Limit for normal users
-    if chat_id != ADMIN_ID:
-        user_usage.setdefault(chat_id, 0)
-        if user_usage[chat_id] >= MAX_GEN:
-            await update.message.reply_text("❌ You used your 2 free generations. Contact admin for more.")
-            return
+    if not check_limit(chat_id):
+        await update.message.reply_text("⚠️ Free limit reached. Subscribe @HiggsMasterBot")
+        return
 
     mode = user_sessions[chat_id]["mode"]
-    hf = HiggsfieldAPI(os.getenv("HF_KEY"), os.getenv("HF_SECRET"))
+    hf = HiggsfieldAPI(HF_KEY, HF_SECRET)
 
     IMAGE_MODEL = "higgsfield-ai/soul/standard"
     VIDEO_MODEL = "higgsfield-ai/dop/standard"
 
-    # ------------------------------
+    loading = await update.message.reply_text("⏳ Generating… Please wait.")
+
+    # --------------------------------------------------------
     # TEXT → IMAGE
-    # ------------------------------
+    # --------------------------------------------------------
     if mode == "text2image":
         payload = {"prompt": text}
-        resp = hf.submit(IMAGE_MODEL, payload)
-        req_id = resp["request_id"]
 
-        final = hf.wait_for_result(req_id)
+        resp = hf.submit(IMAGE_MODEL, payload)
+        req = resp["request_id"]
+        final = hf.wait_for_result(req)
 
         if final.get("status") == "completed":
-            user_usage[chat_id] = user_usage.get(chat_id, 0) + 1
+            increase_limit(chat_id)
+            await context.bot.delete_message(chat_id, loading.message_id)
             await update.message.reply_photo(final["images"][0]["url"])
         else:
-            await update.message.reply_text("❌ Failed to generate image.")
+            await update.message.reply_text("❌ Generation failed.")
 
-    # ------------------------------
+    # --------------------------------------------------------
     # IMAGE → VIDEO
-    # ------------------------------
+    # --------------------------------------------------------
     elif mode == "image2video":
         if "image" not in user_sessions[chat_id]:
-            await update.message.reply_text("📸 Send an image first.")
+            await update.message.reply_text("📸 Please send an image first.")
             return
 
-        local_path = user_sessions[chat_id]["image"]
+        local_image = user_sessions[chat_id]["image"]
 
-        # upload to R2
-        try:
-            image_url = upload_to_r2(local_path)
-        except Exception as e:
-            await update.message.reply_text("❌ Failed to upload image.")
+        # Upload to R2
+        img_url = upload_to_r2(local_image)
+        if not img_url:
+            await update.message.reply_text("❌ Image upload failed.")
             return
 
         payload = {
-            "image_url": image_url,
+            "image_url": img_url,
             "prompt": text,
             "duration": 5
         }
 
         resp = hf.submit(VIDEO_MODEL, payload)
-        req_id = resp["request_id"]
-
-        final = hf.wait_for_result(req_id)
+        req = resp["request_id"]
+        final = hf.wait_for_result(req)
 
         if final.get("status") == "completed":
-            user_usage[chat_id] = user_usage.get(chat_id, 0) + 1
+            increase_limit(chat_id)
+            await context.bot.delete_message(chat_id, loading.message_id)
             await update.message.reply_video(final["video"]["url"])
         else:
             await update.message.reply_text("❌ Video generation failed.")
 
-# ---------------------------
+
+# =====================================================
 # PHOTO HANDLER
-# ---------------------------
+# =====================================================
 async def photo_handler(update, context):
     chat_id = update.message.chat_id
 
     if chat_id not in user_sessions or user_sessions[chat_id]["mode"] != "image2video":
-        await update.message.reply_text("Select Image→Video first using /start.")
+        await update.message.reply_text("Select Image→Video first using /start")
         return
 
     file = await update.message.photo[-1].get_file()
@@ -190,11 +200,16 @@ async def photo_handler(update, context):
     await file.download_to_drive(img_path)
 
     user_sessions[chat_id]["image"] = img_path
+
+    # Log to admin
+    await context.bot.send_message(ADMIN_ID, f"User {chat_id} uploaded an image.")
+
     await update.message.reply_text("📌 Image saved. Now send your video prompt.")
 
-# ---------------------------
+
+# =====================================================
 # REGISTER HANDLERS
-# ---------------------------
+# =====================================================
 def register_handlers(app):
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
