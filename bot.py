@@ -94,7 +94,7 @@ async def message_handler(update, context):
     hf = HiggsfieldAPI(os.getenv("HF_KEY"), os.getenv("HF_SECRET"))
 
     IMAGE_MODEL = "higgsfield-ai/soul/standard"
-    VIDEO_MODEL = "higgsfield-ai/dop/preview"  # ✅ FIXED MODEL
+    VIDEO_MODEL = "higgsfield-ai/dop/preview"
 
     # Start loading animation
     loading_msg = await update.message.reply_text("⏳ Loading…")
@@ -132,7 +132,6 @@ async def message_handler(update, context):
 
         image_path = user_sessions[chat_id]["image"]
 
-        # Upload image to free hosting
         with open(image_path, "rb") as f:
             upload = requests.post("https://tmpfiles.org/api/v1/upload", files={"file": f})
 
@@ -150,8 +149,9 @@ async def message_handler(update, context):
         final = hf.wait_for_result(req_id)
         stop_event.set()
 
+        # ✅ FIXED LINE HERE ONLY
         if final.get("status") == "completed":
-            await update.message.reply_video(final["video"]["url"])
+            await update.message.reply_video(final["videos"][0]["url"])
         else:
             await update.message.reply_text(f"❌ Video generation failed: {final.get('status')}")
 
