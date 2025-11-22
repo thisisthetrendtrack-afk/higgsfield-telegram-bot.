@@ -12,157 +12,148 @@ from telegram import InlineKeyboardMarkup, InlineKeyboardButton
 from higgsfield_api import HiggsfieldAPI
 import requests
 
-# ---------------------------
-# CONFIG
-# ---------------------------
-ADMIN_ID = 7872634386
-GEN_LIMIT = 2
-
-# USER DATA (sessions + usage counter)
+# -----------------------------
+# GLOBAL MEMORY
+# -----------------------------
 user_sessions = {}
-user_usage = {}     # {chat_id: count}
+user_limits = {}   # Track usage
+ADMIN_ID = 7872634386
+MAX_FREE = 2        # Free users get 2 generations
 
-# ---------------------------
-# START COMMAND
-# ---------------------------
+# -----------------------------
+# START
+# -----------------------------
 async def start(update, context):
     keyboard = [
         [InlineKeyboardButton("🖼 Text → Image", callback_data="text2image")]
     ]
 
-    welcome = (
+    msg = (
         "🤖 *Welcome to Higgsfield AI Bot*\n"
-        "Fast, clean and high quality image generation.\n\n"
-        "✨ Bot by @honeyhoney44\n"
-        "🔔 For advanced prompts: *Join @HiggsMasterBotChannel*\n\n"
-        "Select an option below."
+        "✨ Bot by @honeyhoney44\n\n"
+        "📌 You get *2 free generations*\n"
+        "🔔 For prompts & tutorials subscribe: @HiggsMasterBotChannel\n\n"
+        "Select an option below:"
     )
 
     await update.message.reply_text(
-        welcome,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-# ---------------------------
+# -----------------------------
 # BUTTON HANDLER
-# ---------------------------
+# -----------------------------
 async def button_handler(update, context):
-    query = update.callback_query
-    chat_id = query.message.chat_id
-    await query.answer()
+    q = update.callback_query
+    await q.answer()
 
-    user_sessions[chat_id] = {"mode": query.data}
+    mode = q.data
+    chat_id = q.message.chat_id
 
-    if query.data == "text2image":
-        await query.edit_message_text(
-            "📝 Send your *image prompt*.\n"
-            "Example: `Ultra realistic cat driving car, 4k, cinema lighting`",
-            parse_mode="Markdown"
+    user_sessions[chat_id] = {"mode": mode}
+
+    if mode == "text2image":
+        await q.edit_message_text(
+            "📝 Send your *text prompt* below:", parse_mode="Markdown"
         )
 
-# ----------------------------------------------------
-# PROFESSIONAL LOADING ANIMATION
-# ----------------------------------------------------
-async def loading_animation(context, chat_id, message_id, stop_event):
-    frames = [
-        "⏳ Preparing your request…",
-        "🔄 Model running…",
-        "🎨 AI painting your image…",
-        "✨ Finalizing artwork…"
+# -----------------------------
+# PROGRESS BAR (B1)
+# -----------------------------
+async def progress_bar(context, chat_id, message_id, stop_event):
+    bars = [
+        "[▓░░░░░░░░] 10%",
+        "[▓▓▓░░░░░░] 30%",
+        "[▓▓▓▓▓░░░░] 50%",
+        "[▓▓▓▓▓▓▓░░] 70%",
+        "[▓▓▓▓▓▓▓▓▓] 90%",
+        "[▓▓▓▓▓▓▓▓▓▓] 100%"
     ]
+
     i = 0
     while not stop_event.is_set():
         try:
             await context.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,
-                text=frames[i % len(frames)]
+                text=f"⏳ Generating...\n{bars[i % len(bars)]}"
             )
         except:
             pass
         i += 1
-        await asyncio.sleep(4)
+        await asyncio.sleep(2)
 
-# ----------------------------------------------------
-# TEXT HANDLER
-# ----------------------------------------------------
+# -----------------------------
+# TEXT HANDLER (IMAGE GEN)
+# -----------------------------
 async def message_handler(update, context):
     chat_id = update.message.chat_id
     text = update.message.text
 
-    # No session selected
+    # No mode selected
     if chat_id not in user_sessions:
-        await update.message.reply_text("Use /start first.")
+        await update.message.reply_text("Please choose from the menu using /start")
         return
 
     mode = user_sessions[chat_id]["mode"]
 
-    # ---------------------------
-    # DAILY LIMIT CHECK
-    # ---------------------------
+    # Limit: Admin unlimited
     if chat_id != ADMIN_ID:
-        count = user_usage.get(chat_id, 0)
-        if count >= GEN_LIMIT:
+        count = user_limits.get(chat_id, 0)
+        if count >= MAX_FREE:
             await update.message.reply_text(
-                "❌ *Daily Limit Reached*\n"
-                "You have used all 2 free generations.\n"
-                "Subscribe @HiggsMasterBotChannel to unlock more.",
-                parse_mode="Markdown"
+                "⚠ You reached your *2 free generations*.\n"
+                "Subscribe for unlimited access:\n@HiggsMasterBotChannel"
             )
             return
 
-    # Log prompt to admin (TEXT ONLY)
+    # Log prompts to admin
     try:
         await context.bot.send_message(
             chat_id=ADMIN_ID,
-            text=f"📝 *User:* `{chat_id}`\n*Prompt:* {text}",
+            text=f"📝 User `{chat_id}` prompt:\n{text}",
             parse_mode="Markdown"
         )
     except:
         pass
 
-    # Start loading animation
-    loading_msg = await update.message.reply_text("⏳ Loading…")
-    stop_event = asyncio.Event()
-
-    context.application.create_task(
-        loading_animation(context, chat_id, loading_msg.message_id, stop_event)
-    )
-
     hf = HiggsfieldAPI(os.getenv("HF_KEY"), os.getenv("HF_SECRET"))
     MODEL = "higgsfield-ai/soul/standard"
 
-    # ---------------------------
-    # TEXT → IMAGE
-    # ---------------------------
+    # Start progress bar
+    loading_msg = await update.message.reply_text("⏳ Generating…")
+    stop_evt = asyncio.Event()
+
+    context.application.create_task(
+        progress_bar(context, chat_id, loading_msg.message_id, stop_evt)
+    )
+
+    # IMAGE GENERATION
     if mode == "text2image":
         payload = {"prompt": text}
 
-        try:
-            resp = hf.submit(MODEL, payload)
-            req_id = resp["request_id"]
-            final = hf.wait_for_result(req_id)
-        except Exception as e:
-            stop_event.set()
-            await update.message.reply_text(f"❌ Error: {str(e)}")
-            return
+        resp = hf.submit(MODEL, payload)
+        req_id = resp["request_id"]
 
-        stop_event.set()
+        final = hf.wait_for_result(req_id)
+        stop_evt.set()
 
         if final.get("status") == "completed":
-            await update.message.reply_photo(final["images"][0]["url"])
-
-            # increase user usage
+            # Count usage
             if chat_id != ADMIN_ID:
-                user_usage[chat_id] = user_usage.get(chat_id, 0) + 1
+                user_limits[chat_id] = user_limits.get(chat_id, 0) + 1
 
+            await update.message.reply_photo(final["images"][0]["url"])
+            await update.message.reply_text(
+                "🎉 Your image is ready! Enjoy.\n"
+                "Don’t forget to subscribe: @HiggsMasterBotChannel"
+            )
         else:
             await update.message.reply_text(f"❌ Failed: {final.get('status')}")
 
-# ---------------------------
-# REGISTER HANDLERS
-# ---------------------------
+# -----------------------------
+# REGISTER
+# -----------------------------
 def register_handlers(app):
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
