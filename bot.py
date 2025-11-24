@@ -22,11 +22,11 @@ logging.basicConfig(
 )
 
 ADMIN_ID = 7872634386
-MAX_FREE_DAILY = 2  # 2 Generations per day
+MAX_FREE_DAILY = 2
 DATA_FILE = "/app/storage/data.json"
 
 # -----------------------------
-# 2. PERSISTENCE (SAVE/LOAD)
+# 2. PERSISTENCE
 # -----------------------------
 def load_data():
     if os.path.exists(DATA_FILE):
@@ -46,58 +46,40 @@ def save_data(user_limits):
     except Exception as e:
         print(f"⚠️ Could not save data: {e}")
 
-# Load data on start
 user_limits = load_data()
 user_sessions = {}
 
 # -----------------------------
-# 3. HELPER: DAILY LIMIT CHECKER
+# 3. HELPER: LIMIT CHECKER
 # -----------------------------
 def check_limit(chat_id):
-    """
-    Returns True if user can generate, False if limit reached.
-    Resets count if it's a new day.
-    """
-    # 1. Admin is always allowed
-    if chat_id == ADMIN_ID:
-        return True
+    if chat_id == ADMIN_ID: return True
 
     cid = str(chat_id)
     today = datetime.now().strftime("%Y-%m-%d")
-    
-    # Get user data or initialize
     user_data = user_limits.get(cid, {"count": 0, "date": today})
 
-    # 2. Check if it's a new day -> Reset
     if user_data.get("date") != today:
         user_data = {"count": 0, "date": today}
-        user_limits[cid] = user_data # Update memory
-        save_data(user_limits)       # Save reset
+        user_limits[cid] = user_data
+        save_data(user_limits)
 
-    # 3. Check Count
     if user_data["count"] >= MAX_FREE_DAILY:
         return False
-    
     return True
 
 def increment_usage(chat_id):
-    """Increments the usage counter for the user."""
-    if chat_id == ADMIN_ID:
-        return
-
+    if chat_id == ADMIN_ID: return
     cid = str(chat_id)
     today = datetime.now().strftime("%Y-%m-%d")
-    
-    # Update count
     current = user_limits.get(cid, {"count": 0, "date": today})
     current["count"] += 1
-    current["date"] = today # Ensure date is current
-    
+    current["date"] = today
     user_limits[cid] = current
     save_data(user_limits)
 
 # -----------------------------
-# 4. PROGRESS BAR ANIMATION
+# 4. ANIMATION
 # -----------------------------
 async def animate_progress(context, chat_id, message_id, stop_event):
     bars = [
@@ -122,42 +104,61 @@ async def animate_progress(context, chat_id, message_id, stop_event):
         await asyncio.sleep(6)
 
 # -----------------------------
-# 5. START & MENU
+# 5. COMMANDS
 # -----------------------------
 async def start(update, context):
     keyboard = [
         [InlineKeyboardButton("🖼 Text → Image", callback_data="text2image")],
         [InlineKeyboardButton("🎥 Image → Video", callback_data="image2video")]
     ]
+    # --- UPDATE 1: Added Creator Credit ---
     msg = (
         "🤖 *Welcome to Higgsfield AI Bot*\n"
-        "✨ Create cinematic videos & images.\n\n"
-        f"📌 Limit: *{MAX_FREE_DAILY} generations per day*\n"
-        "Choose your mode:"
+        "👤 Bot by @honeyhoney44\n\n"
+        "✨ Create cinematic videos & images.\n"
+        f"📌 Limit: *{MAX_FREE_DAILY} generations per day*\n\n"
+        "👇 *Quick Commands:*\n"
+        "/image - Create an Image\n"
+        "/video - Animate a Photo\n\n"
+        "Or choose a mode below:"
     )
     await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
+async def command_image(update, context):
+    chat_id = update.message.chat_id
+    user_sessions[chat_id] = {"mode": "text2image", "step": "waiting_input"}
+    await update.message.reply_text("📝 *Text to Image Mode*\nSend your prompt below:", parse_mode="Markdown")
+
+async def command_video(update, context):
+    chat_id = update.message.chat_id
+    user_sessions[chat_id] = {"mode": "image2video", "step": "waiting_input"}
+    await update.message.reply_text("🎥 *Image to Video Mode*\nFirst, send me the **Photo** you want to animate.", parse_mode="Markdown")
+
+# -----------------------------
+# 6. MENU BUTTON HANDLER
+# -----------------------------
 async def button_handler(update, context):
     q = update.callback_query
     await q.answer()
     mode = q.data
     chat_id = q.message.chat_id
+    
     user_sessions[chat_id] = {"mode": mode, "step": "waiting_input"}
 
     if mode == "text2image":
-        await q.edit_message_text("📝 *Text to Image*\nSend your prompt:")
+        await q.edit_message_text("📝 *Text to Image Mode*\nSend your prompt below:")
     elif mode == "image2video":
-        await q.edit_message_text("🎥 *Image to Video*\nFirst, send the **Photo**.")
+        await q.edit_message_text("🎥 *Image to Video Mode*\nFirst, send me the **Photo** you want to animate.")
 
 # -----------------------------
-# 6. PHOTO HANDLER
+# 7. PHOTO HANDLER
 # -----------------------------
 async def photo_handler(update, context):
     chat_id = update.message.chat_id
     session = user_sessions.get(chat_id)
 
     if not session or session.get("mode") != "image2video":
-        await update.message.reply_text("⚠ Select '🎥 Image → Video' from /start first.")
+        await update.message.reply_text("⚠ Please select '🎥 Image → Video' or type /video first.")
         return
 
     status_msg = await update.message.reply_text("📥 Processing image...")
@@ -180,7 +181,7 @@ async def photo_handler(update, context):
         await context.bot.edit_message_text(chat_id=chat_id, message_id=status_msg.message_id, text=f"❌ Error: {e}")
 
 # -----------------------------
-# 7. GENERATION HANDLER
+# 8. TEXT GENERATION HANDLER
 # -----------------------------
 async def text_handler(update, context):
     chat_id = update.message.chat_id
@@ -188,15 +189,14 @@ async def text_handler(update, context):
     session = user_sessions.get(chat_id)
 
     if not session:
-        await update.message.reply_text("Please start with /start")
+        await update.message.reply_text("Please select a mode: /image or /video")
         return
 
-    # --- CHECK DAILY LIMIT ---
     if not check_limit(chat_id):
-        await update.message.reply_text("❌ **Daily Limit Reached**\nYou have used your 2 free generations for today.\nTry again tomorrow!")
+        await update.message.reply_text("❌ **Daily Limit Reached**\nTry again tomorrow!")
         return
 
-    # --- ADMIN LOG ---
+    # Admin Log
     try:
         user_name = update.message.from_user.first_name
         await context.bot.send_message(
@@ -208,7 +208,6 @@ async def text_handler(update, context):
 
     hf = HiggsfieldAPI(os.getenv("HF_KEY"), os.getenv("HF_SECRET"))
     
-    # Setup
     payload = {}
     model_id = ""
     status_msg = await update.message.reply_text("⏳ Initializing...")
@@ -223,7 +222,6 @@ async def text_handler(update, context):
         model_id = "higgsfield-ai/dop/turbo"
         payload = {"prompt": text, "image_url": session["image_url"]}
 
-    # Animation
     stop_event = asyncio.Event()
     asyncio.create_task(animate_progress(context, chat_id, status_msg.message_id, stop_event))
 
@@ -231,13 +229,11 @@ async def text_handler(update, context):
         resp = hf.submit(model_id, payload)
         final = await hf.wait_for_result(resp["request_id"])
         
-        stop_event.set() # Stop animation
+        stop_event.set()
 
         if final.get("status") == "completed":
-            # --- INCREMENT USAGE ---
             increment_usage(chat_id)
 
-            # Smart URL Finder
             media_url = None
             if "images" in final: media_url = final["images"][0]["url"]
             elif "video" in final:
@@ -248,10 +244,13 @@ async def text_handler(update, context):
 
             if not media_url: raise ValueError(f"No URL found: {final.keys()}")
 
+            # --- UPDATE 2: Added Subscribe Message ---
+            caption_text = "✨ Here is your result!\n\n🔔 Subscribe for updates: @HiggsMasterBotChannel"
+
             if session["mode"] == "image2video":
-                await update.message.reply_video(media_url, caption="✨ Here is your video!")
+                await update.message.reply_video(media_url, caption=caption_text)
             else:
-                await update.message.reply_photo(media_url, caption="✨ Here is your image!")
+                await update.message.reply_photo(media_url, caption=caption_text)
             
             await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
         else:
@@ -262,10 +261,12 @@ async def text_handler(update, context):
         await update.message.reply_text(f"❌ Error: {e}")
 
 # -----------------------------
-# 8. REGISTER
+# 9. REGISTER
 # -----------------------------
 def register_handlers(app):
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("image", command_image))
+    app.add_handler(CommandHandler("video", command_video))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
