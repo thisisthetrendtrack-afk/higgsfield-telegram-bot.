@@ -14,11 +14,11 @@ from higgsfield_api import HiggsfieldAPI
 # -----------------------------
 # CONFIG
 # -----------------------------
-ADMIN_ID = 7872634386  # Your Admin ID
+ADMIN_ID = 7872634386
 MAX_FREE = 2
-DATA_FILE = "/app/storage/data.json" # Persistent path for Railway
+DATA_FILE = "/app/storage/data.json"  # Railway Persistent Volume
 
-# Memory for active sessions (temporary)
+# Memory for active sessions
 user_sessions = {}
 
 # -----------------------------
@@ -34,16 +34,14 @@ def load_data():
     return {}
 
 def save_data(user_limits):
-    # Ensure directory exists
     os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
     with open(DATA_FILE, "w") as f:
         json.dump({"users": user_limits}, f)
 
-# Load once on start
 user_limits = load_data()
 
 # -----------------------------
-# START COMMAND
+# START
 # -----------------------------
 async def start(update, context):
     keyboard = [
@@ -63,7 +61,7 @@ async def start(update, context):
     )
 
 # -----------------------------
-# MENU HANDLER
+# BUTTON HANDLER
 # -----------------------------
 async def button_handler(update, context):
     q = update.callback_query
@@ -72,7 +70,6 @@ async def button_handler(update, context):
     mode = q.data
     chat_id = q.message.chat_id
     
-    # Initialize session
     user_sessions[chat_id] = {"mode": mode, "step": "waiting_input"}
 
     if mode == "text2image":
@@ -81,7 +78,7 @@ async def button_handler(update, context):
         await q.edit_message_text("🎥 *Image to Video Mode*\nFirst, send me the **Photo** you want to animate.")
 
 # -----------------------------
-# PHOTO HANDLER (For Video)
+# PHOTO HANDLER (STEP 1 FOR VIDEO)
 # -----------------------------
 async def photo_handler(update, context):
     chat_id = update.message.chat_id
@@ -91,9 +88,11 @@ async def photo_handler(update, context):
         await update.message.reply_text("⚠ Please select 'Image → Video' from /start first.")
         return
 
-    # Get highest quality photo
-    photo_file = await update.message.photo[-1].get_file()
-    image_url = photo_file.file_path
+    # Get file and generate PUBLIC link
+    photo = await update.message.photo[-1].get_file()
+    
+    # .link gives the full https URL that Higgsfield needs
+    image_url = photo.link 
 
     session["image_url"] = image_url
     session["step"] = "waiting_prompt"
@@ -103,7 +102,7 @@ async def photo_handler(update, context):
     )
 
 # -----------------------------
-# TEXT HANDLER (Prompts)
+# TEXT HANDLER (PROMPTS)
 # -----------------------------
 async def text_handler(update, context):
     chat_id = update.message.chat_id
@@ -123,11 +122,11 @@ async def text_handler(update, context):
 
     hf = HiggsfieldAPI(os.getenv("HF_KEY"), os.getenv("HF_SECRET"))
     
-    # Setup Request
     payload = {}
     model_id = ""
 
     if session["mode"] == "text2image":
+        # Text -> Image
         model_id = "higgsfield-ai/soul/standard"
         payload = {"prompt": text}
         await update.message.reply_text(f"🎨 Generating Image...")
@@ -137,12 +136,15 @@ async def text_handler(update, context):
             await update.message.reply_text("Please send an image first!")
             return
             
-        model_id = "higgsfield-ai/dop"  # Video Model
+        # --- VIDEO MODEL UPDATE ---
+        # Using the specific Preview model you requested
+        model_id = "higgsfield-ai/dop/preview" 
+        
         payload = {
             "prompt": text,
             "image_url": session["image_url"]
         }
-        await update.message.reply_text(f"🎬 Generating Video... (This takes time)")
+        await update.message.reply_text(f"🎬 Generating Video with DoP Preview...\n(This may take ~30-60 seconds)")
 
     # Execute
     try:
@@ -152,15 +154,16 @@ async def text_handler(update, context):
         final = await hf.wait_for_result(req_id)
 
         if final.get("status") == "completed":
-            # Update Limits
+            # Update Limit & Save
             if chat_id != ADMIN_ID:
                 user_limits[str(chat_id)] = user_limits.get(str(chat_id), 0) + 1
                 save_data(user_limits)
 
+            # API returns results in 'images' list even for video
             media_url = final["images"][0]["url"]
             
             if session["mode"] == "image2video":
-                await update.message.reply_video(media_url, caption="✨ Here is your video!")
+                await update.message.reply_video(media_url, caption="✨ Here is your cinematic video!")
             else:
                 await update.message.reply_photo(media_url, caption="✨ Here is your image!")
         else:
@@ -170,7 +173,7 @@ async def text_handler(update, context):
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
 # -----------------------------
-# REGISTER
+# REGISTER HANDLERS
 # -----------------------------
 def register_handlers(app):
     app.add_handler(CommandHandler("start", start))
