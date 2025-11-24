@@ -22,7 +22,7 @@ logging.basicConfig(
 
 ADMIN_ID = 7872634386
 MAX_FREE = 2
-DATA_FILE = "/app/storage/data.json"  # Railway Persistent Volume
+DATA_FILE = "/app/storage/data.json"
 
 user_sessions = {}
 
@@ -102,7 +102,6 @@ async def photo_handler(update, context):
     try:
         photo_obj = await update.message.photo[-1].get_file()
         
-        # Manually construct URL to ensure it works
         file_path = photo_obj.file_path
         if file_path.startswith("http"):
             image_url = file_path
@@ -117,7 +116,7 @@ async def photo_handler(update, context):
         await context.bot.edit_message_text(
             chat_id=chat_id,
             message_id=status_msg.message_id,
-            text="✅ **Image received!**\n\nNow send a **text prompt** to animate it (e.g., 'Zoom in', 'The character smiles').",
+            text="✅ **Image received!**\n\nNow send a **text prompt** to animate it.",
             parse_mode="Markdown"
         )
 
@@ -164,15 +163,14 @@ async def text_handler(update, context):
             await update.message.reply_text("Please send an image first!")
             return
             
-        # --- FIXED MODEL NAME HERE ---
-        # Changed 'preview' to 'turbo' based on the error message
+        # Using TURBO as required
         model_id = "higgsfield-ai/dop/turbo"
         
         payload = {
             "prompt": text,
             "image_url": session["image_url"]
         }
-        await update.message.reply_text(f"🎬 Generating Video (Turbo Mode)...\n(This takes ~30-60s)")
+        await update.message.reply_text(f"🎬 Generating Video (Turbo)...\n(This takes ~30-60s)")
 
     try:
         resp = hf.submit(model_id, payload)
@@ -184,9 +182,33 @@ async def text_handler(update, context):
             if chat_id != ADMIN_ID:
                 user_limits[str(chat_id)] = user_limits.get(str(chat_id), 0) + 1
                 save_data(user_limits)
-
-            media_url = final["images"][0]["url"]
             
+            # --- THE FIX: SMART URL FINDER ---
+            # We check different keys because Video API structure differs
+            print(f"✅ Final JSON: {final}") # Print to logs for debugging
+            
+            media_url = None
+            if "images" in final:
+                media_url = final["images"][0]["url"]
+            elif "video" in final:
+                # Some APIs return {"video": {"url": "..."}} or {"video": "..."}
+                val = final["video"]
+                if isinstance(val, dict):
+                    media_url = val.get("url")
+                elif isinstance(val, list):
+                     media_url = val[0].get("url")
+                else:
+                    media_url = val
+            elif "output_url" in final:
+                media_url = final["output_url"]
+            elif "result" in final:
+                media_url = final["result"]
+
+            # Fallback if we still can't find it
+            if not media_url:
+                raise ValueError(f"Could not find URL in response keys: {list(final.keys())}")
+
+            # Send Result
             if session["mode"] == "image2video":
                 await update.message.reply_video(media_url, caption="✨ Here is your video!")
             else:
