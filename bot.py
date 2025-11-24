@@ -10,7 +10,6 @@ from telegram.ext import (
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
 
 from higgsfield_api import HiggsfieldAPI
-from nano_banana_api import NanoBananaAPI
 import requests
 
 # ---------------------------
@@ -28,8 +27,7 @@ user_usage = {}     # {chat_id: count}
 # ---------------------------
 async def start(update, context):
     keyboard = [
-        [InlineKeyboardButton("🖼 Text → Image", callback_data="text2image")],
-        [InlineKeyboardButton("🍌 Nano Pro (Text → Image)", callback_data="nano_text")]
+        [InlineKeyboardButton("🖼 Text → Image", callback_data="text2image")]
     ]
 
     welcome = (
@@ -54,19 +52,12 @@ async def button_handler(update, context):
     chat_id = query.message.chat_id
     await query.answer()
 
+    user_sessions[chat_id] = {"mode": query.data}
+
     if query.data == "text2image":
-        user_sessions[chat_id] = {"mode": "text2image"}
         await query.edit_message_text(
             "📝 Send your *image prompt*.\n"
             "Example: `Ultra realistic cat driving car, 4k, cinema lighting`",
-            parse_mode="Markdown"
-        )
-
-    elif query.data == "nano_text":
-        user_sessions[chat_id] = {"mode": "nano_text"}
-        await query.edit_message_text(
-            "🍌 Send your *Nano Pro prompt*.\n"
-            "Example: `Banana warrior riding neon dragon, 4k`",
             parse_mode="Markdown"
         )
 
@@ -121,7 +112,7 @@ async def message_handler(update, context):
             )
             return
 
-    # Log prompt to admin
+    # Log prompt to admin (TEXT ONLY)
     try:
         await context.bot.send_message(
             chat_id=ADMIN_ID,
@@ -134,60 +125,18 @@ async def message_handler(update, context):
     # Start loading animation
     loading_msg = await update.message.reply_text("⏳ Loading…")
     stop_event = asyncio.Event()
+
     context.application.create_task(
         loading_animation(context, chat_id, loading_msg.message_id, stop_event)
     )
 
-    # ==========================================================
-    # NANO PRO TEXT → IMAGE
-    # ==========================================================
-    if mode == "nano_text":
-        api = NanoBananaAPI()
+    hf = HiggsfieldAPI(os.getenv("HF_KEY"), os.getenv("HF_SECRET"))
+    MODEL = "higgsfield-ai/soul/standard"
 
-        try:
-            task = api.create_task(prompt=text)
-            task_id = task["data"]["taskId"]
-        except Exception as e:
-            stop_event.set()
-            await update.message.reply_text(f"❌ Nano Pro Error: {str(e)}")
-            return
-
-        import json
-        # Poll until complete
-        while True:
-            info = api.check_task(task_id)
-            state = info["data"]["state"]
-
-            if state == "success":
-                break
-            elif state == "fail":
-                stop_event.set()
-                await update.message.reply_text("❌ Nano Pro generation failed.")
-                return
-
-            await asyncio.sleep(2)
-
-        stop_event.set()
-
-        # Extract final image
-        result_json = json.loads(info["data"]["resultJson"])
-        url = result_json["resultUrls"][0]
-
-        await update.message.reply_photo(url)
-
-        # Increase user usage
-        if chat_id != ADMIN_ID:
-            user_usage[chat_id] = user_usage.get(chat_id, 0) + 1
-
-        return
-
-    # ==========================================================
-    # HIGGSFIELD TEXT → IMAGE
-    # ==========================================================
+    # ---------------------------
+    # TEXT → IMAGE
+    # ---------------------------
     if mode == "text2image":
-        hf = HiggsfieldAPI(os.getenv("HF_KEY"), os.getenv("HF_SECRET"))
-        MODEL = "higgsfield-ai/soul/standard"
-
         payload = {"prompt": text}
 
         try:
