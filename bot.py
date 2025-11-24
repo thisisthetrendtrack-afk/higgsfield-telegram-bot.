@@ -15,7 +15,6 @@ from higgsfield_api import HiggsfieldAPI
 # -----------------------------
 # 1. CONFIGURATION
 # -----------------------------
-# Setup logging to see errors in Railway logs
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -23,15 +22,14 @@ logging.basicConfig(
 
 ADMIN_ID = 7872634386
 MAX_FREE = 2
-DATA_FILE = "/app/storage/data.json"  # Matches your Railway Volume
+DATA_FILE = "/app/storage/data.json"  # Railway Persistent Volume
 
-user_sessions = {}  # Temporary memory for active users
+user_sessions = {}
 
 # -----------------------------
-# 2. PERSISTENCE (SAVE/LOAD DATA)
+# 2. PERSISTENCE
 # -----------------------------
 def load_data():
-    """Loads user credits from the persistent file."""
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, "r") as f:
@@ -42,7 +40,6 @@ def load_data():
     return {}
 
 def save_data(user_limits):
-    """Saves user credits so they don't reset on restart."""
     try:
         os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
         with open(DATA_FILE, "w") as f:
@@ -50,7 +47,6 @@ def save_data(user_limits):
     except Exception as e:
         print(f"⚠️ Could not save data: {e}")
 
-# Load limits immediately when bot starts
 user_limits = load_data()
 
 # -----------------------------
@@ -74,7 +70,7 @@ async def start(update, context):
     )
 
 # -----------------------------
-# 4. MENU BUTTON HANDLER
+# 4. MENU HANDLER
 # -----------------------------
 async def button_handler(update, context):
     q = update.callback_query
@@ -83,7 +79,6 @@ async def button_handler(update, context):
     mode = q.data
     chat_id = q.message.chat_id
     
-    # Initialize user session
     user_sessions[chat_id] = {"mode": mode, "step": "waiting_input"}
 
     if mode == "text2image":
@@ -92,53 +87,46 @@ async def button_handler(update, context):
         await q.edit_message_text("🎥 *Image to Video Mode*\nFirst, send me the **Photo** you want to animate.")
 
 # -----------------------------
-# 5. PHOTO HANDLER (FIXED & ROBUST)
+# 5. PHOTO HANDLER
 # -----------------------------
 async def photo_handler(update, context):
     chat_id = update.message.chat_id
     session = user_sessions.get(chat_id)
 
-    # Check if user is in the correct mode
     if not session or session.get("mode") != "image2video":
         await update.message.reply_text("⚠ Please select '🎥 Image → Video' from /start first.")
         return
 
-    # Send status so user knows bot is working
     status_msg = await update.message.reply_text("📥 Processing image...")
 
     try:
-        # Get the file object from Telegram
         photo_obj = await update.message.photo[-1].get_file()
         
-        # --- THE FIX: Manually construct URL to prevent errors ---
-        # This handles cases where .link might be missing or broken
+        # Manually construct URL to ensure it works
         file_path = photo_obj.file_path
         if file_path.startswith("http"):
             image_url = file_path
         else:
             image_url = f"https://api.telegram.org/file/bot{context.bot.token}/{file_path}"
             
-        # Save URL to session
         session["image_url"] = image_url
         session["step"] = "waiting_prompt"
 
-        print(f"📸 Image linked successfully: {image_url}")
+        print(f"📸 Image linked: {image_url}")
         
-        # Update status message
         await context.bot.edit_message_text(
             chat_id=chat_id,
             message_id=status_msg.message_id,
-            text="✅ **Image linked!**\n\nNow send a **text prompt** to animate it (e.g., 'Zoom in', 'The character smiles').",
+            text="✅ **Image received!**\n\nNow send a **text prompt** to animate it (e.g., 'Zoom in', 'The character smiles').",
             parse_mode="Markdown"
         )
 
     except Exception as e:
-        # If it fails, print the REAL error to the chat so we can fix it
         print(f"❌ Photo Error: {e}")
         await context.bot.edit_message_text(
             chat_id=chat_id,
             message_id=status_msg.message_id,
-            text=f"❌ **Error Detected:**\n`{str(e)}`\n\nPlease forward this to the admin.",
+            text=f"❌ **Error:**\n`{str(e)}`",
             parse_mode="Markdown"
         )
 
@@ -154,7 +142,7 @@ async def text_handler(update, context):
         await update.message.reply_text("Please start with /start")
         return
 
-    # Check Usage Limits
+    # Check Limits
     if chat_id != ADMIN_ID:
         count = user_limits.get(str(chat_id), 0)
         if count >= MAX_FREE:
@@ -163,7 +151,6 @@ async def text_handler(update, context):
 
     hf = HiggsfieldAPI(os.getenv("HF_KEY"), os.getenv("HF_SECRET"))
     
-    # Prepare API Payload
     payload = {}
     model_id = ""
 
@@ -177,31 +164,27 @@ async def text_handler(update, context):
             await update.message.reply_text("Please send an image first!")
             return
             
-        # Using the PREVIEW model (Faster & reliable)
-        model_id = "higgsfield-ai/dop/preview"
+        # --- FIXED MODEL NAME HERE ---
+        # Changed 'preview' to 'turbo' based on the error message
+        model_id = "higgsfield-ai/dop/turbo"
         
         payload = {
             "prompt": text,
             "image_url": session["image_url"]
         }
-        await update.message.reply_text(f"🎬 Generating Video...\n(This usually takes 30-60 seconds)")
+        await update.message.reply_text(f"🎬 Generating Video (Turbo Mode)...\n(This takes ~30-60s)")
 
-    # Execute API Call
     try:
-        # Submit Job
         resp = hf.submit(model_id, payload)
         req_id = resp["request_id"]
 
-        # Wait for result (Async - won't freeze bot)
         final = await hf.wait_for_result(req_id)
 
         if final.get("status") == "completed":
-            # Update User Limits
             if chat_id != ADMIN_ID:
                 user_limits[str(chat_id)] = user_limits.get(str(chat_id), 0) + 1
                 save_data(user_limits)
 
-            # Send Result
             media_url = final["images"][0]["url"]
             
             if session["mode"] == "image2video":
@@ -209,14 +192,14 @@ async def text_handler(update, context):
             else:
                 await update.message.reply_photo(media_url, caption="✨ Here is your image!")
         else:
-            await update.message.reply_text(f"❌ Generation Failed: {final.get('status')}")
+            await update.message.reply_text(f"❌ Failed: {final.get('status')}")
 
     except Exception as e:
-        print(f"❌ Logic Error: {e}")
+        print(f"❌ API Error: {e}")
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
 # -----------------------------
-# 7. REGISTER HANDLERS
+# 7. REGISTER
 # -----------------------------
 def register_handlers(app):
     app.add_handler(CommandHandler("start", start))
