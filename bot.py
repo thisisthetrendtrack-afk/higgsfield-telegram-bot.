@@ -10,146 +10,145 @@ from telegram.ext import (
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
 
 from higgsfield_api import HiggsfieldAPI
+from nano_banana_api import NanoBananaAPI
 import requests
 
 # -----------------------------
 # GLOBAL MEMORY
 # -----------------------------
-user_sessions = {}
-user_limits = {}   # Track usage
-ADMIN_ID = 7872634386
-MAX_FREE = 2        # Free users get 2 generations
+global_memory = {}  # user_id -> { mode: "text" | "banana", prompt: "" }
 
 # -----------------------------
-# START
+# COMMAND: /start
 # -----------------------------
 async def start(update, context):
-    keyboard = [
-        [InlineKeyboardButton("🖼 Text → Image", callback_data="text2image")]
-    ]
+    user_id = update.message.from_user.id
 
-    msg = (
-        "🤖 *Welcome to Higgsfield AI Bot*\n"
-        "✨ Bot by @honeyhoney44\n\n"
-        "📌 You get *2 free generations*\n"
-        "🔔 For prompts & tutorials subscribe: @HiggsMasterBotChannel\n\n"
-        "Select an option below:"
-    )
+    keyboard = [
+        [
+            InlineKeyboardButton("🎨 Text → Image (Higgsfield)", callback_data="mode_text"),
+        ],
+        [
+            InlineKeyboardButton("🍌 Text → Image (Nano Pro)", callback_data="mode_banana"),
+        ]
+    ]
 
     await update.message.reply_text(
-        msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
+        "👋 Welcome! Choose a generation mode:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 # -----------------------------
-# BUTTON HANDLER
+# MODE SWITCH HANDLER
 # -----------------------------
 async def button_handler(update, context):
-    q = update.callback_query
-    await q.answer()
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
 
-    mode = q.data
-    chat_id = q.message.chat_id
+    if user_id not in global_memory:
+        global_memory[user_id] = { "mode": None, "prompt": "" }
 
-    user_sessions[chat_id] = {"mode": mode}
-
-    if mode == "text2image":
-        await q.edit_message_text(
-            "📝 Send your *text prompt* below:", parse_mode="Markdown"
+    if query.data == "mode_text":
+        global_memory[user_id]["mode"] = "text"
+        await query.edit_message_text(
+            "🎨 *Text → Image (Higgsfield)* selected!\nSend me a prompt.",
+            parse_mode="Markdown",
         )
 
-# -----------------------------
-# PROGRESS BAR (B1)
-# -----------------------------
-async def progress_bar(context, chat_id, message_id, stop_event):
-    bars = [
-        "[▓░░░░░░░░] 10%",
-        "[▓▓▓░░░░░░] 30%",
-        "[▓▓▓▓▓░░░░] 50%",
-        "[▓▓▓▓▓▓▓░░] 70%",
-        "[▓▓▓▓▓▓▓▓▓] 90%",
-        "[▓▓▓▓▓▓▓▓▓▓] 100%"
-    ]
+    elif query.data == "mode_banana":
+        global_memory[user_id]["mode"] = "banana"
+        await query.edit_message_text(
+            "🍌 *Nano Pro Text → Image* selected!\nSend me a prompt.",
+            parse_mode="Markdown",
+        )
 
-    i = 0
-    while not stop_event.is_set():
-        try:
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=f"⏳ Generating...\n{bars[i % len(bars)]}"
-            )
-        except:
-            pass
-        i += 1
-        await asyncio.sleep(2)
 
 # -----------------------------
-# TEXT HANDLER (IMAGE GEN)
+# TEXT HANDLER
 # -----------------------------
 async def message_handler(update, context):
-    chat_id = update.message.chat_id
-    text = update.message.text
+    user_id = update.message.from_user.id
 
-    # No mode selected
-    if chat_id not in user_sessions:
-        await update.message.reply_text("Please choose from the menu using /start")
+    if user_id not in global_memory:
+        await update.message.reply_text("❗ Please choose a mode first using /start")
         return
 
-    mode = user_sessions[chat_id]["mode"]
+    mode = global_memory[user_id]["mode"]
+    prompt = update.message.text
+    global_memory[user_id]["prompt"] = prompt
 
-    # Limit: Admin unlimited
-    if chat_id != ADMIN_ID:
-        count = user_limits.get(chat_id, 0)
-        if count >= MAX_FREE:
-            await update.message.reply_text(
-                "⚠ You reached your *2 free generations*.\n"
-                "Subscribe for unlimited access:\n@HiggsMasterBotChannel"
-            )
+    # -----------------------------
+    # HIGGSFIELD TEXT TO IMAGE
+    # -----------------------------
+    if mode == "text":
+        await update.message.reply_text("⏳ Generating your image with Higgsfield...")
+
+        api = HiggsfieldAPI()
+        result = api.create_generation(prompt=prompt, mode="text_to_image")
+
+        if "id" not in result:
+            await update.message.reply_text("❌ Failed to start generation.")
             return
 
-    # Log prompts to admin
-    try:
-        await context.bot.send_message(
-            chat_id=ADMIN_ID,
-            text=f"📝 User `{chat_id}` prompt:\n{text}",
-            parse_mode="Markdown"
-        )
-    except:
-        pass
+        gen_id = result["id"]
 
-    hf = HiggsfieldAPI(os.getenv("HF_KEY"), os.getenv("HF_SECRET"))
-    MODEL = "higgsfield-ai/soul/standard"
+        # Polling
+        while True:
+            final = api.check_generation(gen_id)
+            if final.get("status") == "completed":
+                break
+            await asyncio.sleep(2)
 
-    # Start progress bar
-    loading_msg = await update.message.reply_text("⏳ Generating…")
-    stop_evt = asyncio.Event()
-
-    context.application.create_task(
-        progress_bar(context, chat_id, loading_msg.message_id, stop_evt)
-    )
-
-    # IMAGE GENERATION
-    if mode == "text2image":
-        payload = {"prompt": text}
-
-        resp = hf.submit(MODEL, payload)
-        req_id = resp["request_id"]
-
-        final = hf.wait_for_result(req_id)
-        stop_evt.set()
-
-        if final.get("status") == "completed":
-            # Count usage
-            if chat_id != ADMIN_ID:
-                user_limits[chat_id] = user_limits.get(chat_id, 0) + 1
-
-            await update.message.reply_photo(final["images"][0]["url"])
+        # Send image
+        url = final.get("image_url")
+        if url:
+            photo = requests.get(url).content
+            await update.message.reply_photo(photo)
             await update.message.reply_text(
-                "🎉 Your image is ready! Enjoy.\n"
-                "Don’t forget to subscribe: @HiggsMasterBotChannel"
+                "🎉 Your Higgsfield image is ready!"
             )
         else:
-            await update.message.reply_text(f"❌ Failed: {final.get('status')}")
+            await update.message.reply_text("❌ Failed to get image URL")
+
+    # -----------------------------
+    # NANO BANANA TEXT TO IMAGE
+    # -----------------------------
+    elif mode == "banana":
+        await update.message.reply_text("🍌 Generating with Nano Banana Pro...")
+
+        api = NanoBananaAPI()
+        task = api.create_task(prompt=prompt)
+
+        if task.get("code") != 200:
+            await update.message.reply_text("❌ Failed to create Nano Pro task.")
+            return
+
+        task_id = task["data"]["taskId"]
+
+        # Polling
+        import json
+        while True:
+            info = api.check_task(task_id)
+            state = info["data"]["state"]
+
+            if state == "success":
+                break
+            elif state == "fail":
+                await update.message.reply_text("❌ Nano Pro generation failed.")
+                return
+
+            await asyncio.sleep(2)
+
+        # Parse result
+        result_json = json.loads(info["data"]["resultJson"])
+        url = result_json["resultUrls"][0]
+
+        image = requests.get(url).content
+        await update.message.reply_photo(image)
+
+        await update.message.reply_text("🍌✨ Your Nano Pro image is ready!")
+
 
 # -----------------------------
 # REGISTER
