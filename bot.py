@@ -104,39 +104,35 @@ async def animate_progress(context, chat_id, message_id, stop_event):
         await asyncio.sleep(6)
 
 # -----------------------------
-# 5. COMMANDS & MENU
+# 5. COMMANDS
 # -----------------------------
 async def start(update, context):
     keyboard = [
         [InlineKeyboardButton("🖼 Text → Image", callback_data="text2image")],
-        [InlineKeyboardButton("🎥 Higgsfield Video", callback_data="image2video")],
-        [InlineKeyboardButton("🎬 Kling Video (Pro)", callback_data="kling_video")]
+        [InlineKeyboardButton("🎥 Image → Video", callback_data="image2video")]
     ]
-    
+    # --- UPDATE 1: Added Creator Credit ---
     msg = (
         "🤖 *Welcome to Higgsfield AI Bot*\n"
         "👤 Bot by @honeyhoney44\n\n"
         "✨ Create cinematic videos & images.\n"
         f"📌 Limit: *{MAX_FREE_DAILY} generations per day*\n\n"
         "👇 *Quick Commands:*\n"
-        "/image - Create Image\n"
-        "/video - Higgsfield Video\n"
-        "/kling - Kling Pro Video\n\n"
+        "/image - Create an Image\n"
+        "/video - Animate a Photo\n\n"
         "Or choose a mode below:"
     )
     await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def command_image(update, context):
-    user_sessions[update.message.chat_id] = {"mode": "text2image", "step": "waiting_input"}
+    chat_id = update.message.chat_id
+    user_sessions[chat_id] = {"mode": "text2image", "step": "waiting_input"}
     await update.message.reply_text("📝 *Text to Image Mode*\nSend your prompt below:", parse_mode="Markdown")
 
 async def command_video(update, context):
-    user_sessions[update.message.chat_id] = {"mode": "image2video", "step": "waiting_input"}
-    await update.message.reply_text("🎥 *Higgsfield Video Mode*\nFirst, send me the **Photo**.", parse_mode="Markdown")
-
-async def command_kling(update, context):
-    user_sessions[update.message.chat_id] = {"mode": "kling_video", "step": "waiting_input"}
-    await update.message.reply_text("🎬 *Kling Pro Video Mode*\nFirst, send me the **Photo**.", parse_mode="Markdown")
+    chat_id = update.message.chat_id
+    user_sessions[chat_id] = {"mode": "image2video", "step": "waiting_input"}
+    await update.message.reply_text("🎥 *Image to Video Mode*\nFirst, send me the **Photo** you want to animate.", parse_mode="Markdown")
 
 # -----------------------------
 # 6. MENU BUTTON HANDLER
@@ -152,9 +148,7 @@ async def button_handler(update, context):
     if mode == "text2image":
         await q.edit_message_text("📝 *Text to Image Mode*\nSend your prompt below:")
     elif mode == "image2video":
-        await q.edit_message_text("🎥 *Higgsfield Video Mode*\nFirst, send me the **Photo**.")
-    elif mode == "kling_video":
-        await q.edit_message_text("🎬 *Kling Pro Video Mode*\nFirst, send me the **Photo**.")
+        await q.edit_message_text("🎥 *Image to Video Mode*\nFirst, send me the **Photo** you want to animate.")
 
 # -----------------------------
 # 7. PHOTO HANDLER
@@ -163,8 +157,8 @@ async def photo_handler(update, context):
     chat_id = update.message.chat_id
     session = user_sessions.get(chat_id)
 
-    if not session or session.get("mode") not in ["image2video", "kling_video"]:
-        await update.message.reply_text("⚠ Please select a Video Mode (/video or /kling) first.")
+    if not session or session.get("mode") != "image2video":
+        await update.message.reply_text("⚠ Please select '🎥 Image → Video' or type /video first.")
         return
 
     status_msg = await update.message.reply_text("📥 Processing image...")
@@ -177,18 +171,17 @@ async def photo_handler(update, context):
         session["image_url"] = image_url
         session["step"] = "waiting_prompt"
 
-        mode_name = "Kling Pro" if session["mode"] == "kling_video" else "Higgsfield"
         await context.bot.edit_message_text(
             chat_id=chat_id,
             message_id=status_msg.message_id,
-            text=f"✅ **Image Linked for {mode_name}!**\nNow send a **text prompt**.",
+            text="✅ **Image Linked!**\nNow send a **text prompt**.",
             parse_mode="Markdown"
         )
     except Exception as e:
         await context.bot.edit_message_text(chat_id=chat_id, message_id=status_msg.message_id, text=f"❌ Error: {e}")
 
 # -----------------------------
-# 8. TEXT HANDLER (GENERATION)
+# 8. TEXT GENERATION HANDLER
 # -----------------------------
 async def text_handler(update, context):
     chat_id = update.message.chat_id
@@ -196,13 +189,14 @@ async def text_handler(update, context):
     session = user_sessions.get(chat_id)
 
     if not session:
-        await update.message.reply_text("Please select a mode first!")
+        await update.message.reply_text("Please select a mode: /image or /video")
         return
 
     if not check_limit(chat_id):
         await update.message.reply_text("❌ **Daily Limit Reached**\nTry again tomorrow!")
         return
 
+    # Admin Log
     try:
         user_name = update.message.from_user.first_name
         await context.bot.send_message(
@@ -218,37 +212,21 @@ async def text_handler(update, context):
     model_id = ""
     status_msg = await update.message.reply_text("⏳ Initializing...")
 
-    # --- MODEL SELECTION & PAYLOAD FIX ---
     if session["mode"] == "text2image":
         model_id = "higgsfield-ai/soul/standard"
         payload = {"prompt": text}
-
     elif session["mode"] == "image2video":
+        if session.get("step") != "waiting_prompt":
+            await update.message.reply_text("Send an image first!")
+            return
         model_id = "higgsfield-ai/dop/turbo"
         payload = {"prompt": text, "image_url": session["image_url"]}
-
-    elif session["mode"] == "kling_video":
-        # --- FIX: Update Slug & Payload Key ---
-        # Trying the slug that typically works for Kling v2.1 Pro
-        model_id = "kling-v2-1-pro-image-to-video"
-        
-        # Kling often requires 'image' key, but we send both to be safe against 500 errors
-        payload = {
-            "prompt": text,
-            "image": session["image_url"],     # Primary key for Kling
-            "image_url": session["image_url"]  # Fallback key
-        }
 
     stop_event = asyncio.Event()
     asyncio.create_task(animate_progress(context, chat_id, status_msg.message_id, stop_event))
 
     try:
         resp = hf.submit(model_id, payload)
-        
-        # Check if submit failed immediately
-        if "request_id" not in resp:
-             raise ValueError(f"Submission failed: {resp}")
-
         final = await hf.wait_for_result(resp["request_id"])
         
         stop_event.set()
@@ -266,9 +244,10 @@ async def text_handler(update, context):
 
             if not media_url: raise ValueError(f"No URL found: {final.keys()}")
 
+            # --- UPDATE 2: Added Subscribe Message ---
             caption_text = "✨ Here is your result!\n\n🔔 Subscribe for updates: @HiggsMasterBotChannel"
 
-            if session["mode"] in ["image2video", "kling_video"]:
+            if session["mode"] == "image2video":
                 await update.message.reply_video(media_url, caption=caption_text)
             else:
                 await update.message.reply_photo(media_url, caption=caption_text)
@@ -279,9 +258,6 @@ async def text_handler(update, context):
 
     except Exception as e:
         stop_event.set()
-        # Print full error for debugging
-        print(f"❌ API Error Payload: {payload}")
-        print(f"❌ API Error Msg: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
 
 # -----------------------------
@@ -291,7 +267,6 @@ def register_handlers(app):
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("image", command_image))
     app.add_handler(CommandHandler("video", command_video))
-    app.add_handler(CommandHandler("kling", command_kling))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
