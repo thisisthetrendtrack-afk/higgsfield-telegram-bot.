@@ -2,7 +2,26 @@ import os
 import time
 from telegram.ext import ApplicationBuilder
 from telegram.error import Conflict
-from bot import register_handlers
+from telegram import BotCommand
+from bot import register_handlers, init_db, migrate_from_json
+
+
+async def setup_commands(app):
+    """Register all bot commands with Telegram"""
+    await app.bot.set_my_commands([
+        BotCommand("start", "Main menu"),
+        BotCommand("image", "Generate image from text"),
+        BotCommand("video", "Animate photo with motion"),
+        BotCommand("quota", "Check remaining generations"),
+        BotCommand("myplan", "View your current plan"),
+        BotCommand("plans", "View all pricing plans"),
+        BotCommand("redeem", "Redeem a premium plan key"),
+        BotCommand("help", "Show all commands"),
+        BotCommand("genkey", "🔐 Admin: Generate redemption keys"),
+        BotCommand("members", "🔐 Admin: View premium members"),
+        BotCommand("broadcast", "🔐 Admin: Send announcement to all users"),
+    ])
+    print("✅ Commands registered with Telegram")
 
 
 def main():
@@ -17,9 +36,14 @@ def main():
         raise RuntimeError("HF_KEY or HF_SECRET missing in environment variables")
 
     print("🚀 Higgsfield Bot Starting...")
+    
+    # Initialize database and migrate old data
+    init_db()
+    migrate_from_json()
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     register_handlers(app)
+    app.post_init = setup_commands
 
     # Run with retry logic for 409 Conflict errors
     max_retries = 5
@@ -31,7 +55,7 @@ def main():
             break
         except Conflict as e:
             retry_count += 1
-            wait_time = 10 + (retry_count * 5)  # 15, 20, 25, 30, 35 seconds
+            wait_time = 10 + (retry_count * 5)
             print(f"⚠️ Conflict detected (retry {retry_count}/{max_retries}). Waiting {wait_time}s...")
             time.sleep(wait_time)
         except Exception as e:
