@@ -5,6 +5,8 @@ import logging
 import string
 import random
 from datetime import datetime, timedelta
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from telegram.ext import (
     CommandHandler,
     MessageHandler,
@@ -22,7 +24,7 @@ logging.basicConfig(
 
 ADMIN_ID = 7872634386
 MAX_FREE_DAILY = 2
-DATA_FILE = "data.json"
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 PLANS = {
     "starter": {"price": 2, "duration_days": 1, "daily_limit": 10, "name": "Starter (1 day)"},
@@ -31,76 +33,186 @@ PLANS = {
     "lifetime": {"price": 50, "duration_days": 999999, "daily_limit": None, "name": "Lifetime"}
 }
 
-def load_data():
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, "r") as f:
-                data = json.load(f)
-                return data.get("users", {}), data.get("keys", {})
-        except Exception as e:
-            print(f"⚠️ Could not load data: {e}")
-            return {}, {}
-    return {}, {}
+def get_db_connection():
+    """Get database connection"""
+    return psycopg2.connect(DATABASE_URL)
 
-def save_data(user_limits, keys):
+def init_db():
+    """Initialize database tables"""
     try:
-        with open(DATA_FILE, "w") as f:
-            json.dump({"users": user_limits, "keys": keys}, f)
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                chat_id BIGINT PRIMARY KEY,
+                count INT DEFAULT 0,
+                date DATE DEFAULT CURRENT_DATE,
+                plan_type VARCHAR(20),
+                plan_expiry TIMESTAMP
+            )
+        """)
+        
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS redemption_keys (
+                key VARCHAR(20) PRIMARY KEY,
+                plan VARCHAR(20),
+                used BOOLEAN DEFAULT FALSE,
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                used_by BIGINT,
+                used_date TIMESTAMP
+            )
+        """)
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("✅ Database initialized")
     except Exception as e:
-        print(f"⚠️ Could not save data: {e}")
+        print(f"⚠️ DB init error: {e}")
 
-user_limits, redemption_keys = load_data()
+def migrate_from_json():
+    """Migrate old data from data.json to PostgreSQL"""
+    if not os.path.exists("data.json"):
+        return
+    
+    try:
+        with open("data.json", "r") as f:
+            data = json.load(f)
+        
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Migrate users
+        for chat_id, user_data in data.get("users", {}).items():
+            cur.execute("""
+                INSERT INTO users (chat_id, count, date, plan_type, plan_expiry)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (chat_id) DO UPDATE SET
+                    count = EXCLUDED.count,
+                    date = EXCLUDED.date,
+                    plan_type = EXCLUDED.plan_type,
+                    plan_expiry = EXCLUDED.plan_expiry
+            """, (
+                int(chat_id),
+                user_data.get("count", 0),
+                user_data.get("date", datetime.now().strftime("%Y-%m-%d")),
+                user_data.get("plan_type"),
+                user_data.get("plan_expiry")
+            ))
+        
+        # Migrate keys
+        for key, key_data in data.get("keys", {}).items():
+            cur.execute("""
+                INSERT INTO redemption_keys (key, plan, used, created_date, used_by, used_date)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (key) DO NOTHING
+            """, (
+                key,
+                key_data.get("plan"),
+                key_data.get("used", False),
+                key_data.get("created_date"),
+                key_data.get("used_by"),
+                key_data.get("used_date")
+            ))
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("✅ Migration complete!")
+    except Exception as e:
+        print(f"⚠️ Migration error: {e}")
+
+def get_user_daily_limit(chat_id):
+    """Get the daily limit for a user based on their paid plan or free tier"""
+    if chat_id == ADMIN_ID:
+        return None
+    
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("SELECT * FROM users WHERE chat_id = %s", (chat_id,))
+        user_data = cur.fetchone()
+        cur.close()
+        conn.close()
+        
+        if user_data and user_data.get("plan_expiry"):
+            expiry = user_data["plan_expiry"]
+            if isinstance(expiry, str):
+                expiry = datetime.fromisoformat(expiry)
+            if datetime.now() < expiry:
+                plan_type = user_data.get("plan_type", "starter")
+                return PLANS.get(plan_type, {}).get("daily_limit", MAX_FREE_DAILY)
+        
+        return MAX_FREE_DAILY
+    except:
+        return MAX_FREE_DAILY
+
+def check_limit(chat_id):
+    if chat_id == ADMIN_ID:
+        return True
+    
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cur.execute("SELECT * FROM users WHERE chat_id = %s", (chat_id,))
+        user_data = cur.fetchone()
+        
+        if not user_data:
+            cur.execute(
+                "INSERT INTO users (chat_id, count, date) VALUES (%s, 0, %s)",
+                (chat_id, today)
+            )
+            conn.commit()
+            cur.close()
+            conn.close()
+            return True
+        
+        if user_data.get("date") != today:
+            cur.execute(
+                "UPDATE users SET count = 0, date = %s WHERE chat_id = %s",
+                (today, chat_id)
+            )
+            conn.commit()
+        
+        daily_limit = get_user_daily_limit(chat_id)
+        if user_data.get("count", 0) >= daily_limit:
+            cur.close()
+            conn.close()
+            return False
+        
+        cur.close()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"⚠️ Check limit error: {e}")
+        return True
+
+def increment_usage(chat_id):
+    if chat_id == ADMIN_ID:
+        return
+    
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE users SET count = count + 1 WHERE chat_id = %s",
+            (chat_id,)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ Increment error: {e}")
+
 user_sessions = {}
 
 def generate_redemption_key(plan_type):
     """Generate a unique redemption key"""
     key = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
     return key
-
-def get_user_daily_limit(chat_id):
-    """Get the daily limit for a user based on their paid plan or free tier"""
-    if chat_id == ADMIN_ID:
-        return None  # Unlimited
-    
-    cid = str(chat_id)
-    user_data = user_limits.get(cid, {})
-    
-    # Check if user has active paid plan
-    if "plan_expiry" in user_data:
-        expiry = datetime.fromisoformat(user_data["plan_expiry"])
-        if datetime.now() < expiry:
-            plan_type = user_data.get("plan_type", "starter")
-            return PLANS.get(plan_type, {}).get("daily_limit", MAX_FREE_DAILY)
-    
-    # Return free tier limit
-    return MAX_FREE_DAILY
-
-def check_limit(chat_id):
-    if chat_id == ADMIN_ID: return True
-
-    cid = str(chat_id)
-    today = datetime.now().strftime("%Y-%m-%d")
-    user_data = user_limits.get(cid, {"count": 0, "date": today})
-
-    if user_data.get("date") != today:
-        user_data = {"count": 0, "date": today}
-        user_limits[cid] = user_data
-        save_data(user_limits, redemption_keys)
-
-    daily_limit = get_user_daily_limit(chat_id)
-    if user_data["count"] >= daily_limit:
-        return False
-    return True
-
-def increment_usage(chat_id):
-    if chat_id == ADMIN_ID: return
-    cid = str(chat_id)
-    today = datetime.now().strftime("%Y-%m-%d")
-    current = user_limits.get(cid, {"count": 0, "date": today})
-    current["count"] += 1
-    current["date"] = today
-    user_limits[cid] = current
-    save_data(user_limits, redemption_keys)
 
 async def animate_progress(context, chat_id, message_id, stop_event):
     bars = [
@@ -142,7 +254,6 @@ async def start(update, context):
         [InlineKeyboardButton("🖼 Text → Image", callback_data="text2image")],
         [InlineKeyboardButton("🎥 Image → Video", callback_data="image2video")]
     ]
-    cid = str(update.message.chat_id)
     daily_limit = get_user_daily_limit(update.message.chat_id)
     limit_text = f"{daily_limit}/day" if daily_limit else "Unlimited"
     
@@ -190,60 +301,69 @@ async def command_redeem(update, context):
     
     key = context.args[0].upper()
     chat_id = update.message.chat_id
-    cid = str(chat_id)
     
-    if key not in redemption_keys:
-        await update.message.reply_text("❌ Invalid redemption key!")
-        return
-    
-    key_data = redemption_keys[key]
-    
-    if key_data.get("used"):
-        await update.message.reply_text("❌ This key has already been used!")
-        return
-    
-    # Mark key as used
-    key_data["used"] = True
-    key_data["used_by"] = cid
-    key_data["used_date"] = datetime.now().isoformat()
-    
-    # Apply plan to user
-    plan_type = key_data["plan"]
-    plan = PLANS[plan_type]
-    expiry_date = datetime.now() + timedelta(days=plan["duration_days"])
-    
-    user_limits[cid] = {
-        "count": 0,
-        "date": datetime.now().strftime("%Y-%m-%d"),
-        "plan_type": plan_type,
-        "plan_expiry": expiry_date.isoformat()
-    }
-    
-    save_data(user_limits, redemption_keys)
-    
-    # Notify admin about redemption
-    user_name = update.message.from_user.first_name or "Unknown"
     try:
-        await context.bot.send_message(
-            chat_id=ADMIN_ID,
-            text=f"🔑 *Key Redeemed!*\n\n"
-                 f"👤 User: {user_name} (`{chat_id}`)\n"
-                 f"💳 Plan: {plan['name']}\n"
-                 f"🔑 Key: `{key}`\n"
-                 f"📅 Expires: {expiry_date.strftime('%Y-%m-%d %H:%M UTC')}",
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cur.execute("SELECT * FROM redemption_keys WHERE key = %s", (key,))
+        key_data = cur.fetchone()
+        
+        if not key_data:
+            await update.message.reply_text("❌ Invalid redemption key!")
+            cur.close()
+            conn.close()
+            return
+        
+        if key_data.get("used"):
+            await update.message.reply_text("❌ This key has already been used!")
+            cur.close()
+            conn.close()
+            return
+        
+        plan_type = key_data["plan"]
+        plan = PLANS[plan_type]
+        expiry_date = datetime.now() + timedelta(days=plan["duration_days"])
+        
+        cur.execute(
+            "UPDATE redemption_keys SET used = TRUE, used_by = %s, used_date = NOW() WHERE key = %s",
+            (chat_id, key)
+        )
+        
+        today = datetime.now().strftime("%Y-%m-%d")
+        cur.execute(
+            "INSERT INTO users (chat_id, count, date, plan_type, plan_expiry) VALUES (%s, 0, %s, %s, %s) ON CONFLICT (chat_id) DO UPDATE SET plan_type = EXCLUDED.plan_type, plan_expiry = EXCLUDED.plan_expiry",
+            (chat_id, today, plan_type, expiry_date)
+        )
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        user_name = update.message.from_user.first_name or "Unknown"
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"🔑 *Key Redeemed!*\n\n"
+                     f"👤 User: {user_name} (`{chat_id}`)\n"
+                     f"💳 Plan: {plan['name']}\n"
+                     f"🔑 Key: `{key}`\n"
+                     f"📅 Expires: {expiry_date.strftime('%Y-%m-%d %H:%M UTC')}",
+                parse_mode="Markdown"
+            )
+        except:
+            pass
+        
+        await update.message.reply_text(
+            f"✅ *Plan Activated!*\n\n"
+            f"Plan: {plan['name']}\n"
+            f"Limit: {plan['daily_limit']}/day\n"
+            f"Expires: {expiry_date.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+            f"Start using: /image or /video",
             parse_mode="Markdown"
         )
-    except:
-        pass
-    
-    await update.message.reply_text(
-        f"✅ *Plan Activated!*\n\n"
-        f"Plan: {plan['name']}\n"
-        f"Limit: {plan['daily_limit']}/day\n"
-        f"Expires: {expiry_date.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
-        f"Start using: /image or /video",
-        parse_mode="Markdown"
-    )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
 
 async def admin_genkey(update, context):
     if update.message.chat_id != ADMIN_ID:
@@ -270,26 +390,36 @@ async def admin_genkey(update, context):
         await update.message.reply_text(f"❌ Invalid plan. Use: {', '.join(PLANS.keys())}")
         return
     
-    generated = []
-    for _ in range(count):
-        key = generate_redemption_key(plan)
-        while key in redemption_keys:
-            key = generate_redemption_key(plan)
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
         
-        redemption_keys[key] = {
-            "plan": plan,
-            "used": False,
-            "created_date": datetime.now().isoformat()
-        }
-        generated.append(key)
-    
-    save_data(user_limits, redemption_keys)
-    
-    keys_list = "\n".join(generated)
-    await update.message.reply_text(
-        f"✅ Generated {count} {plan.upper()} keys:\n\n`{keys_list}`",
-        parse_mode="Markdown"
-    )
+        generated = []
+        for _ in range(count):
+            key = generate_redemption_key(plan)
+            while True:
+                cur.execute("SELECT key FROM redemption_keys WHERE key = %s", (key,))
+                if not cur.fetchone():
+                    break
+                key = generate_redemption_key(plan)
+            
+            cur.execute(
+                "INSERT INTO redemption_keys (key, plan) VALUES (%s, %s)",
+                (key, plan)
+            )
+            generated.append(key)
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        keys_list = "\n".join(generated)
+        await update.message.reply_text(
+            f"✅ Generated {count} {plan.upper()} keys:\n\n`{keys_list}`",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
 
 async def command_image(update, context):
     chat_id = update.message.chat_id
@@ -526,16 +656,23 @@ async def command_help(update, context):
 
 async def command_quota(update, context):
     chat_id = update.message.chat_id
-    cid = str(chat_id)
     daily_limit = get_user_daily_limit(chat_id)
     
-    today = datetime.now().strftime("%Y-%m-%d")
-    user_data = user_limits.get(cid, {"count": 0, "date": today})
-    
-    if user_data.get("date") != today:
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("SELECT count, date FROM users WHERE chat_id = %s", (chat_id,))
+        user_data = cur.fetchone()
+        cur.close()
+        conn.close()
+        
+        if not user_data or user_data.get("date") != today:
+            used = 0
+        else:
+            used = user_data.get("count", 0)
+    except:
         used = 0
-    else:
-        used = user_data.get("count", 0)
     
     if daily_limit is None:
         remaining_text = "∞ (Unlimited)"
@@ -556,8 +693,6 @@ async def command_quota(update, context):
 
 async def command_myplan(update, context):
     chat_id = update.message.chat_id
-    cid = str(chat_id)
-    user_data = user_limits.get(cid, {})
     
     if chat_id == ADMIN_ID:
         plan_text = (
@@ -565,33 +700,51 @@ async def command_myplan(update, context):
             "Unlimited generations forever\n\n"
             "Use `/genkey PLAN COUNT` to generate redemption keys"
         )
-    elif "plan_expiry" in user_data:
-        expiry = datetime.fromisoformat(user_data["plan_expiry"])
-        if datetime.now() < expiry:
-            plan_type = user_data.get("plan_type", "free")
-            plan = PLANS.get(plan_type, {})
-            days_left = (expiry - datetime.now()).days
-            daily_limit = plan.get("daily_limit", "∞")
+    else:
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+            cur.execute("SELECT * FROM users WHERE chat_id = %s", (chat_id,))
+            user_data = cur.fetchone()
+            cur.close()
+            conn.close()
             
-            plan_text = (
-                f"🎯 *Your Current Plan*\n\n"
-                f"Plan: {plan.get('name', 'Free')}\n"
-                f"Daily limit: {daily_limit}\n"
-                f"Expires in: {days_left} days\n"
-                f"Expiry date: {expiry.strftime('%Y-%m-%d %H:%M UTC')}"
-            )
-        else:
+            if user_data and user_data.get("plan_expiry"):
+                expiry = user_data["plan_expiry"]
+                if isinstance(expiry, str):
+                    expiry = datetime.fromisoformat(expiry)
+                
+                if datetime.now() < expiry:
+                    plan_type = user_data.get("plan_type", "free")
+                    plan = PLANS.get(plan_type, {})
+                    days_left = (expiry - datetime.now()).days
+                    daily_limit = plan.get("daily_limit", "∞")
+                    
+                    plan_text = (
+                        f"🎯 *Your Current Plan*\n\n"
+                        f"Plan: {plan.get('name', 'Free')}\n"
+                        f"Daily limit: {daily_limit}\n"
+                        f"Expires in: {days_left} days\n"
+                        f"Expiry date: {expiry.strftime('%Y-%m-%d %H:%M UTC')}"
+                    )
+                else:
+                    plan_text = (
+                        "📌 *Free Tier*\n\n"
+                        f"Daily limit: {MAX_FREE_DAILY}\n\n"
+                        "Use `/redeem KEY` to upgrade to premium"
+                    )
+            else:
+                plan_text = (
+                    "📌 *Free Tier*\n\n"
+                    f"Daily limit: {MAX_FREE_DAILY}\n\n"
+                    "Use `/redeem KEY` to upgrade to premium"
+                )
+        except:
             plan_text = (
                 "📌 *Free Tier*\n\n"
                 f"Daily limit: {MAX_FREE_DAILY}\n\n"
                 "Use `/redeem KEY` to upgrade to premium"
             )
-    else:
-        plan_text = (
-            "📌 *Free Tier*\n\n"
-            f"Daily limit: {MAX_FREE_DAILY}\n\n"
-            "Use `/redeem KEY` to upgrade to premium"
-        )
     
     await update.message.reply_text(plan_text, parse_mode="Markdown")
 
@@ -600,37 +753,36 @@ async def admin_members(update, context):
         await update.message.reply_text("❌ Admin only!")
         return
     
-    active_members = []
-    now = datetime.now()
-    
-    for cid, user_data in user_limits.items():
-        if "plan_expiry" in user_data:
-            expiry = datetime.fromisoformat(user_data["plan_expiry"])
-            if now < expiry:
-                plan_type = user_data.get("plan_type", "unknown")
-                plan = PLANS.get(plan_type, {})
-                days_left = (expiry - now).days
-                active_members.append({
-                    "id": cid,
-                    "plan": plan.get("name", plan_type),
-                    "expiry": expiry.strftime("%Y-%m-%d"),
-                    "days_left": days_left
-                })
-    
-    if not active_members:
-        await update.message.reply_text("📊 *Active Members*\n\nNo active premium members yet")
-        return
-    
-    members_text = f"📊 *Active Premium Members* ({len(active_members)})\n\n"
-    for member in sorted(active_members, key=lambda x: x["days_left"], reverse=True):
-        members_text += f"👤 `{member['id']}`\n"
-        members_text += f"   💳 {member['plan']}\n"
-        members_text += f"   📅 Expires: {member['expiry']} ({member['days_left']}d left)\n\n"
-    
-    await update.message.reply_text(members_text, parse_mode="Markdown")
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("SELECT * FROM users WHERE plan_expiry > NOW() ORDER BY plan_expiry DESC")
+        active_members = cur.fetchall()
+        cur.close()
+        conn.close()
+        
+        if not active_members:
+            await update.message.reply_text("📊 *Active Members*\n\nNo active premium members yet")
+            return
+        
+        members_text = f"📊 *Active Premium Members* ({len(active_members)})\n\n"
+        for member in active_members:
+            plan_type = member.get("plan_type", "unknown")
+            plan = PLANS.get(plan_type, {})
+            expiry = member["plan_expiry"]
+            if isinstance(expiry, str):
+                expiry = datetime.fromisoformat(expiry)
+            days_left = (expiry - datetime.now()).days
+            
+            members_text += f"👤 `{member['chat_id']}`\n"
+            members_text += f"   💳 {plan.get('name', plan_type)}\n"
+            members_text += f"   📅 Expires: {expiry.strftime('%Y-%m-%d')} ({days_left}d left)\n\n"
+        
+        await update.message.reply_text(members_text, parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
 
 async def admin_broadcast(update, context):
-    """Admin command to send broadcast message to all users"""
     if update.message.chat_id != ADMIN_ID:
         await update.message.reply_text("❌ Admin only!")
         return
@@ -645,34 +797,41 @@ async def admin_broadcast(update, context):
     
     message = " ".join(context.args)
     
-    # Get all user IDs from data
-    user_ids = list(user_limits.keys())
-    
-    if not user_ids:
-        await update.message.reply_text("❌ No users to broadcast to")
-        return
-    
-    status_msg = await update.message.reply_text(f"📢 Broadcasting to {len(user_ids)} users...")
-    
-    sent = 0
-    failed = 0
-    
-    for user_id in user_ids:
-        try:
-            await context.bot.send_message(
-                chat_id=int(user_id),
-                text=f"📢 *Announcement from Admin*\n\n{message}",
-                parse_mode="Markdown"
-            )
-            sent += 1
-        except:
-            failed += 1
-    
-    await context.bot.edit_message_text(
-        chat_id=update.message.chat_id,
-        message_id=status_msg.message_id,
-        text=f"✅ Broadcast Complete!\n\n📨 Sent: {sent}\n❌ Failed: {failed}"
-    )
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT chat_id FROM users")
+        user_ids = [row[0] for row in cur.fetchall()]
+        cur.close()
+        conn.close()
+        
+        if not user_ids:
+            await update.message.reply_text("❌ No users to broadcast to")
+            return
+        
+        status_msg = await update.message.reply_text(f"📢 Broadcasting to {len(user_ids)} users...")
+        
+        sent = 0
+        failed = 0
+        
+        for user_id in user_ids:
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"📢 *Announcement from Admin*\n\n{message}",
+                    parse_mode="Markdown"
+                )
+                sent += 1
+            except:
+                failed += 1
+        
+        await context.bot.edit_message_text(
+            chat_id=update.message.chat_id,
+            message_id=status_msg.message_id,
+            text=f"✅ Broadcast Complete!\n\n📨 Sent: {sent}\n❌ Failed: {failed}"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
 
 def register_handlers(app):
     app.add_handler(CommandHandler("start", start))
@@ -689,3 +848,17 @@ def register_handlers(app):
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+
+async def main():
+    init_db()
+    migrate_from_json()
+    
+    app = ApplicationBuilder().token(os.getenv("BOT_TOKEN")).build()
+    register_handlers(app)
+    
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+
+if __name__ == '__main__':
+    asyncio.run(main())
