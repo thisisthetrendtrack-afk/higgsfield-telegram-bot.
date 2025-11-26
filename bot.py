@@ -629,6 +629,51 @@ async def admin_members(update, context):
     
     await update.message.reply_text(members_text, parse_mode="Markdown")
 
+async def admin_broadcast(update, context):
+    """Admin command to send broadcast message to all users"""
+    if update.message.chat_id != ADMIN_ID:
+        await update.message.reply_text("❌ Admin only!")
+        return
+    
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: `/broadcast YOUR MESSAGE HERE`\n\n"
+            "Example: `/broadcast Check out our new video features!`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    message = " ".join(context.args)
+    
+    # Get all user IDs from data
+    user_ids = list(user_limits.keys())
+    
+    if not user_ids:
+        await update.message.reply_text("❌ No users to broadcast to")
+        return
+    
+    status_msg = await update.message.reply_text(f"📢 Broadcasting to {len(user_ids)} users...")
+    
+    sent = 0
+    failed = 0
+    
+    for user_id in user_ids:
+        try:
+            await context.bot.send_message(
+                chat_id=int(user_id),
+                text=f"📢 *Announcement from Admin*\n\n{message}",
+                parse_mode="Markdown"
+            )
+            sent += 1
+        except:
+            failed += 1
+    
+    await context.bot.edit_message_text(
+        chat_id=update.message.chat_id,
+        message_id=status_msg.message_id,
+        text=f"✅ Broadcast Complete!\n\n📨 Sent: {sent}\n❌ Failed: {failed}"
+    )
+
 def register_handlers(app):
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("image", command_image))
@@ -640,6 +685,7 @@ def register_handlers(app):
     app.add_handler(CommandHandler("myplan", command_myplan))
     app.add_handler(CommandHandler("genkey", admin_genkey))
     app.add_handler(CommandHandler("members", admin_members))
+    app.add_handler(CommandHandler("broadcast", admin_broadcast))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
