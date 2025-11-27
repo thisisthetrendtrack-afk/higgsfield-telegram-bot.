@@ -34,15 +34,12 @@ PLANS = {
 }
 
 def get_db_connection():
-    """Get database connection"""
     return psycopg2.connect(DATABASE_URL)
 
 def init_db():
-    """Initialize database tables"""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        
         cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 chat_id BIGINT PRIMARY KEY,
@@ -52,7 +49,6 @@ def init_db():
                 plan_expiry TIMESTAMP
             )
         """)
-        
         cur.execute("""
             CREATE TABLE IF NOT EXISTS redemption_keys (
                 key VARCHAR(20) PRIMARY KEY,
@@ -63,7 +59,6 @@ def init_db():
                 used_date TIMESTAMP
             )
         """)
-        
         conn.commit()
         cur.close()
         conn.close()
@@ -72,18 +67,13 @@ def init_db():
         print(f"⚠️ DB init error: {e}")
 
 def migrate_from_json():
-    """Migrate old data from data.json to PostgreSQL"""
     if not os.path.exists("data.json"):
         return
-    
     try:
         with open("data.json", "r") as f:
             data = json.load(f)
-        
         conn = get_db_connection()
         cur = conn.cursor()
-        
-        # Migrate users
         for chat_id, user_data in data.get("users", {}).items():
             cur.execute("""
                 INSERT INTO users (chat_id, count, date, plan_type, plan_expiry)
@@ -100,8 +90,6 @@ def migrate_from_json():
                 user_data.get("plan_type"),
                 user_data.get("plan_expiry")
             ))
-        
-        # Migrate keys
         for key, key_data in data.get("keys", {}).items():
             cur.execute("""
                 INSERT INTO redemption_keys (key, plan, used, created_date, used_by, used_date)
@@ -115,7 +103,6 @@ def migrate_from_json():
                 key_data.get("used_by"),
                 key_data.get("used_date")
             ))
-        
         conn.commit()
         cur.close()
         conn.close()
@@ -123,11 +110,15 @@ def migrate_from_json():
     except Exception as e:
         print(f"⚠️ Migration error: {e}")
 
+user_sessions = {}
+
+def generate_redemption_key(plan_type):
+    key = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+    return key
+
 def get_user_daily_limit(chat_id):
-    """Get the daily limit for a user based on their paid plan or free tier"""
     if chat_id == ADMIN_ID:
         return None
-    
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
@@ -135,7 +126,6 @@ def get_user_daily_limit(chat_id):
         user_data = cur.fetchone()
         cur.close()
         conn.close()
-        
         if user_data and user_data.get("plan_expiry"):
             expiry = user_data["plan_expiry"]
             if isinstance(expiry, str):
@@ -143,7 +133,6 @@ def get_user_daily_limit(chat_id):
             if datetime.now() < expiry:
                 plan_type = user_data.get("plan_type", "starter")
                 return PLANS.get(plan_type, {}).get("daily_limit", MAX_FREE_DAILY)
-        
         return MAX_FREE_DAILY
     except:
         return MAX_FREE_DAILY
@@ -151,15 +140,12 @@ def get_user_daily_limit(chat_id):
 def check_limit(chat_id):
     if chat_id == ADMIN_ID:
         return True
-    
     try:
         today = datetime.now().strftime("%Y-%m-%d")
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        
         cur.execute("SELECT * FROM users WHERE chat_id = %s", (chat_id,))
         user_data = cur.fetchone()
-        
         if not user_data:
             cur.execute(
                 "INSERT INTO users (chat_id, count, date) VALUES (%s, 0, %s)",
@@ -169,31 +155,26 @@ def check_limit(chat_id):
             cur.close()
             conn.close()
             return True
-        
         if user_data.get("date") != today:
             cur.execute(
                 "UPDATE users SET count = 0, date = %s WHERE chat_id = %s",
                 (today, chat_id)
             )
             conn.commit()
-        
         daily_limit = get_user_daily_limit(chat_id)
         if user_data.get("count", 0) >= daily_limit:
             cur.close()
             conn.close()
             return False
-        
         cur.close()
         conn.close()
         return True
-    except Exception as e:
-        print(f"⚠️ Check limit error: {e}")
+    except:
         return True
 
 def increment_usage(chat_id):
     if chat_id == ADMIN_ID:
         return
-    
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -204,15 +185,8 @@ def increment_usage(chat_id):
         conn.commit()
         cur.close()
         conn.close()
-    except Exception as e:
-        print(f"⚠️ Increment error: {e}")
-
-user_sessions = {}
-
-def generate_redemption_key(plan_type):
-    """Generate a unique redemption key"""
-    key = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
-    return key
+    except:
+        pass
 
 async def animate_progress(context, chat_id, message_id, stop_event):
     bars = [
@@ -256,7 +230,6 @@ async def start(update, context):
     ]
     daily_limit = get_user_daily_limit(update.message.chat_id)
     limit_text = f"{daily_limit}/day" if daily_limit else "Unlimited"
-    
     msg = (
         "🤖 *Welcome to Higgsfield AI Bot*\n"
         "Bot by @honeyhoney44\n\n"
@@ -298,48 +271,38 @@ async def command_redeem(update, context):
             parse_mode="Markdown"
         )
         return
-    
     key = context.args[0].upper()
     chat_id = update.message.chat_id
-    
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        
         cur.execute("SELECT * FROM redemption_keys WHERE key = %s", (key,))
         key_data = cur.fetchone()
-        
         if not key_data:
             await update.message.reply_text("❌ Invalid redemption key!")
             cur.close()
             conn.close()
             return
-        
         if key_data.get("used"):
             await update.message.reply_text("❌ This key has already been used!")
             cur.close()
             conn.close()
             return
-        
         plan_type = key_data["plan"]
         plan = PLANS[plan_type]
         expiry_date = datetime.now() + timedelta(days=plan["duration_days"])
-        
         cur.execute(
             "UPDATE redemption_keys SET used = TRUE, used_by = %s, used_date = NOW() WHERE key = %s",
             (chat_id, key)
         )
-        
         today = datetime.now().strftime("%Y-%m-%d")
         cur.execute(
             "INSERT INTO users (chat_id, count, date, plan_type, plan_expiry) VALUES (%s, 0, %s, %s, %s) ON CONFLICT (chat_id) DO UPDATE SET plan_type = EXCLUDED.plan_type, plan_expiry = EXCLUDED.plan_expiry",
             (chat_id, today, plan_type, expiry_date)
         )
-        
         conn.commit()
         cur.close()
         conn.close()
-        
         user_name = update.message.from_user.first_name or "Unknown"
         try:
             await context.bot.send_message(
@@ -353,7 +316,6 @@ async def command_redeem(update, context):
             )
         except:
             pass
-        
         await update.message.reply_text(
             f"✅ *Plan Activated!*\n\n"
             f"Plan: {plan['name']}\n"
@@ -369,7 +331,6 @@ async def admin_genkey(update, context):
     if update.message.chat_id != ADMIN_ID:
         await update.message.reply_text("❌ Admin only!")
         return
-    
     if not context.args or len(context.args) < 2:
         await update.message.reply_text(
             "Usage: `/genkey PLAN COUNT`\n\n"
@@ -378,22 +339,18 @@ async def admin_genkey(update, context):
             parse_mode="Markdown"
         )
         return
-    
     plan = context.args[0].lower()
     try:
         count = int(context.args[1])
     except:
         await update.message.reply_text("❌ Count must be a number")
         return
-    
     if plan not in PLANS:
         await update.message.reply_text(f"❌ Invalid plan. Use: {', '.join(PLANS.keys())}")
         return
-    
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        
         generated = []
         for _ in range(count):
             key = generate_redemption_key(plan)
@@ -402,17 +359,14 @@ async def admin_genkey(update, context):
                 if not cur.fetchone():
                     break
                 key = generate_redemption_key(plan)
-            
             cur.execute(
                 "INSERT INTO redemption_keys (key, plan) VALUES (%s, %s)",
                 (key, plan)
             )
             generated.append(key)
-        
         conn.commit()
         cur.close()
         conn.close()
-        
         keys_list = "\n".join(generated)
         await update.message.reply_text(
             f"✅ Generated {count} {plan.upper()} keys:\n\n`{keys_list}`",
@@ -444,13 +398,11 @@ async def button_handler(update, context):
     await q.answer()
     data = q.data
     chat_id = q.message.chat_id
-
     if data.startswith("model_"):
         session = user_sessions.get(chat_id)
         if not session:
             await q.edit_message_text("⚠️ Session expired. Please use /start to begin again.")
             return
-
         model_key = data.replace("model_", "")
         model_map = {
             "dop_turbo": "higgsfield-ai/dop/turbo",
@@ -458,7 +410,6 @@ async def button_handler(update, context):
         }
         session["video_model"] = model_map.get(model_key, "higgsfield-ai/dop/turbo")
         session["step"] = "waiting_ratio"
-
         model_label = {"dop_turbo": "⚡ Fast", "dop_standard": "🎨 Standard"}.get(model_key, model_key)
         await q.edit_message_text(
             f"✅ Model: *{model_label}*\n\nNow select your aspect ratio:",
@@ -466,19 +417,15 @@ async def button_handler(update, context):
             reply_markup=get_ratio_keyboard()
         )
         return
-
     if data.startswith("ratio_"):
         session = user_sessions.get(chat_id)
         if not session:
             await q.edit_message_text("⚠️ Session expired. Please use /start to begin again.")
             return
-
         ratio = data.replace("ratio_", "")
         session["aspect_ratio"] = ratio
         session["step"] = "waiting_input"
-
         ratio_label = {"9:16": "📱 9:16", "16:9": "💻 16:9", "1:1": "⬜ 1:1"}.get(ratio, ratio)
-
         if session["mode"] == "text2image":
             await q.edit_message_text(
                 f"✅ Aspect Ratio: *{ratio_label}*\n\n📝 Now send your *text prompt* to generate an image:",
@@ -490,7 +437,6 @@ async def button_handler(update, context):
                 parse_mode="Markdown"
             )
         return
-
     if data in ["text2image", "image2video"]:
         if data == "text2image":
             user_sessions[chat_id] = {"mode": data, "step": "waiting_ratio"}
@@ -510,31 +456,24 @@ async def button_handler(update, context):
 async def photo_handler(update, context):
     chat_id = update.message.chat_id
     session = user_sessions.get(chat_id)
-
     if not session or session.get("mode") != "image2video":
         await update.message.reply_text("⚠ Please select '🎥 Image → Video' or type /video first.")
         return
-
     if session.get("step") == "waiting_ratio":
         await update.message.reply_text(
             "⚠️ Please select an aspect ratio first:",
             reply_markup=get_ratio_keyboard()
         )
         return
-
     status_msg = await update.message.reply_text("📥 Processing image...")
-
     try:
         photo_obj = await update.message.photo[-1].get_file()
         file_path = photo_obj.file_path
         image_url = file_path if file_path.startswith("http") else f"https://api.telegram.org/file/bot{context.bot.token}/{file_path}"
-            
         session["image_url"] = image_url
         session["step"] = "waiting_prompt"
-
         ratio = session.get("aspect_ratio", "1:1")
         ratio_label = {"9:16": "📱 9:16", "16:9": "💻 16:9", "1:1": "⬜ 1:1"}.get(ratio, ratio)
-
         await context.bot.edit_message_text(
             chat_id=chat_id,
             message_id=status_msg.message_id,
@@ -548,18 +487,15 @@ async def text_handler(update, context):
     chat_id = update.message.chat_id
     text = update.message.text
     session = user_sessions.get(chat_id)
-
     if not session:
         await update.message.reply_text("Please select a mode: /image or /video")
         return
-
     if session.get("step") == "waiting_ratio":
         await update.message.reply_text(
             "⚠️ Please select an aspect ratio first:",
             reply_markup=get_ratio_keyboard()
         )
         return
-
     if not check_limit(chat_id):
         daily_limit = get_user_daily_limit(chat_id)
         await update.message.reply_text(
@@ -569,7 +505,6 @@ async def text_handler(update, context):
             parse_mode="Markdown"
         )
         return
-
     try:
         user_name = update.message.from_user.first_name
         ratio = session.get("aspect_ratio", "1:1")
@@ -579,15 +514,11 @@ async def text_handler(update, context):
             parse_mode="Markdown"
         )
     except: pass
-
     hf = HiggsfieldAPI(os.getenv("HF_KEY"), os.getenv("HF_SECRET"))
-    
     payload = {}
     model_id = ""
     status_msg = await update.message.reply_text("⏳ Initializing...")
-
     aspect_ratio = session.get("aspect_ratio", "1:1")
-
     if session["mode"] == "text2image":
         model_id = "higgsfield-ai/soul/standard"
         payload = {"prompt": text, "aspect_ratio": aspect_ratio}
@@ -597,19 +528,14 @@ async def text_handler(update, context):
             return
         model_id = session.get("video_model", "higgsfield-ai/dop/turbo")
         payload = {"prompt": text, "image_url": session["image_url"], "aspect_ratio": aspect_ratio}
-
     stop_event = asyncio.Event()
     asyncio.create_task(animate_progress(context, chat_id, status_msg.message_id, stop_event))
-
     try:
         resp = hf.submit(model_id, payload)
         final = await hf.wait_for_result(resp["request_id"])
-        
         stop_event.set()
-
         if final.get("status") == "completed":
             increment_usage(chat_id)
-
             media_url = None
             if "images" in final: media_url = final["images"][0]["url"]
             elif "video" in final:
@@ -617,21 +543,16 @@ async def text_handler(update, context):
                 media_url = v.get("url") if isinstance(v, dict) else (v[0].get("url") if isinstance(v, list) else v)
             elif "output_url" in final: media_url = final["output_url"]
             elif "result" in final: media_url = final["result"]
-
             if not media_url: raise ValueError(f"No URL found: {final.keys()}")
-
             ratio_label = {"9:16": "📱 9:16", "16:9": "💻 16:9", "1:1": "⬜ 1:1"}.get(aspect_ratio, aspect_ratio)
             caption_text = f"✨ Here is your result!\n📐 Ratio: {ratio_label}\n\n🔔 Subscribe: @HiggsMasterBotChannel"
-
             if session["mode"] == "image2video":
                 await update.message.reply_video(media_url, caption=caption_text)
             else:
                 await update.message.reply_photo(media_url, caption=caption_text)
-            
             await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
         else:
             await update.message.reply_text(f"❌ Failed: {final.get('status')}")
-
     except Exception as e:
         stop_event.set()
         await update.message.reply_text(f"❌ Error: {e}")
@@ -657,7 +578,6 @@ async def command_help(update, context):
 async def command_quota(update, context):
     chat_id = update.message.chat_id
     daily_limit = get_user_daily_limit(chat_id)
-    
     try:
         today = datetime.now().strftime("%Y-%m-%d")
         conn = get_db_connection()
@@ -666,14 +586,12 @@ async def command_quota(update, context):
         user_data = cur.fetchone()
         cur.close()
         conn.close()
-        
         if not user_data or user_data.get("date") != today:
             used = 0
         else:
             used = user_data.get("count", 0)
     except:
         used = 0
-    
     if daily_limit is None:
         remaining_text = "∞ (Unlimited)"
         limit_text = "Unlimited"
@@ -681,7 +599,6 @@ async def command_quota(update, context):
         remaining = max(0, daily_limit - used)
         remaining_text = f"{remaining}/{daily_limit}"
         limit_text = f"{daily_limit}/day"
-    
     quota_text = (
         f"📊 *Your Quota Today*\n\n"
         f"Remaining: {remaining_text}\n"
@@ -693,7 +610,6 @@ async def command_quota(update, context):
 
 async def command_myplan(update, context):
     chat_id = update.message.chat_id
-    
     if chat_id == ADMIN_ID:
         plan_text = (
             "👑 *Admin Account*\n\n"
@@ -708,18 +624,15 @@ async def command_myplan(update, context):
             user_data = cur.fetchone()
             cur.close()
             conn.close()
-            
             if user_data and user_data.get("plan_expiry"):
                 expiry = user_data["plan_expiry"]
                 if isinstance(expiry, str):
                     expiry = datetime.fromisoformat(expiry)
-                
                 if datetime.now() < expiry:
                     plan_type = user_data.get("plan_type", "free")
                     plan = PLANS.get(plan_type, {})
                     days_left = (expiry - datetime.now()).days
                     daily_limit = plan.get("daily_limit", "∞")
-                    
                     plan_text = (
                         f"🎯 *Your Current Plan*\n\n"
                         f"Plan: {plan.get('name', 'Free')}\n"
@@ -745,14 +658,12 @@ async def command_myplan(update, context):
                 f"Daily limit: {MAX_FREE_DAILY}\n\n"
                 "Use `/redeem KEY` to upgrade to premium"
             )
-    
     await update.message.reply_text(plan_text, parse_mode="Markdown")
 
 async def admin_members(update, context):
     if update.message.chat_id != ADMIN_ID:
         await update.message.reply_text("❌ Admin only!")
         return
-    
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
@@ -760,11 +671,9 @@ async def admin_members(update, context):
         active_members = cur.fetchall()
         cur.close()
         conn.close()
-        
         if not active_members:
             await update.message.reply_text("📊 *Active Members*\n\nNo active premium members yet")
             return
-        
         members_text = f"📊 *Active Premium Members* ({len(active_members)})\n\n"
         for member in active_members:
             plan_type = member.get("plan_type", "unknown")
@@ -773,12 +682,35 @@ async def admin_members(update, context):
             if isinstance(expiry, str):
                 expiry = datetime.fromisoformat(expiry)
             days_left = (expiry - datetime.now()).days
-            
             members_text += f"👤 `{member['chat_id']}`\n"
             members_text += f"   💳 {plan.get('name', plan_type)}\n"
             members_text += f"   📅 Expires: {expiry.strftime('%Y-%m-%d')} ({days_left}d left)\n\n"
-        
         await update.message.reply_text(members_text, parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
+
+async def admin_dbstatus(update, context):
+    if update.message.chat_id != ADMIN_ID:
+        await update.message.reply_text("❌ Admin only!")
+        return
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM users")
+        total_users = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM users WHERE plan_expiry > NOW()")
+        premium_users = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM redemption_keys WHERE used = FALSE")
+        unused_keys = cur.fetchone()[0]
+        cur.close()
+        conn.close()
+        status_text = (
+            f"📊 *Database Status*\n\n"
+            f"👥 Total Users: {total_users}\n"
+            f"💳 Premium Users: {premium_users}\n"
+            f"🔑 Unused Keys: {unused_keys}"
+        )
+        await update.message.reply_text(status_text, parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
 
@@ -786,7 +718,6 @@ async def admin_broadcast(update, context):
     if update.message.chat_id != ADMIN_ID:
         await update.message.reply_text("❌ Admin only!")
         return
-    
     if not context.args:
         await update.message.reply_text(
             "Usage: `/broadcast YOUR MESSAGE HERE`\n\n"
@@ -794,9 +725,7 @@ async def admin_broadcast(update, context):
             parse_mode="Markdown"
         )
         return
-    
     message = " ".join(context.args)
-    
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -804,27 +733,22 @@ async def admin_broadcast(update, context):
         user_ids = [row[0] for row in cur.fetchall()]
         cur.close()
         conn.close()
-        
         if not user_ids:
-            await update.message.reply_text("❌ No users to broadcast to")
+            await update.message.reply_text("❌ No users in database")
             return
-        
         status_msg = await update.message.reply_text(f"📢 Broadcasting to {len(user_ids)} users...")
-        
         sent = 0
         failed = 0
-        
         for user_id in user_ids:
             try:
                 await context.bot.send_message(
-                    chat_id=user_id,
+                    chat_id=int(user_id),
                     text=f"📢 *Announcement from Admin*\n\n{message}",
                     parse_mode="Markdown"
                 )
                 sent += 1
             except:
                 failed += 1
-        
         await context.bot.edit_message_text(
             chat_id=update.message.chat_id,
             message_id=status_msg.message_id,
@@ -845,20 +769,7 @@ def register_handlers(app):
     app.add_handler(CommandHandler("genkey", admin_genkey))
     app.add_handler(CommandHandler("members", admin_members))
     app.add_handler(CommandHandler("broadcast", admin_broadcast))
+    app.add_handler(CommandHandler("dbstatus", admin_dbstatus))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-
-async def main():
-    init_db()
-    migrate_from_json()
-    
-    app = ApplicationBuilder().token(os.getenv("BOT_TOKEN")).build()
-    register_handlers(app)
-    
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
-
-if __name__ == '__main__':
-    asyncio.run(main())
