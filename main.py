@@ -12,6 +12,7 @@ async def setup_commands(app):
         BotCommand("start", "Main menu"),
         BotCommand("image", "Generate image from text"),
         BotCommand("video", "Animate photo with motion"),
+        BotCommand("textvideo", "Generate video from text (Kling)"),
         BotCommand("quota", "Check remaining generations"),
         BotCommand("myplan", "View your current plan"),
         BotCommand("plans", "View all pricing plans"),
@@ -37,7 +38,6 @@ def main():
 
     print("🚀 Higgsfield Bot Starting...")
     
-    # Initialize database and migrate old data
     init_db()
     migrate_from_json()
 
@@ -45,7 +45,6 @@ def main():
     register_handlers(app)
     app.post_init = setup_commands
 
-    # Run with retry logic for 409 Conflict errors
     max_retries = 5
     retry_count = 0
     
