@@ -227,6 +227,7 @@ def get_video_model_keyboard():
 async def start(update, context):
     keyboard = [
         [InlineKeyboardButton("🖼 Text → Image", callback_data="text2image")],
+        [InlineKeyboardButton("🤖 Text → Image (Nano Banana)", callback_data="text2image_nano")],
         [InlineKeyboardButton("🎥 Image → Video", callback_data="image2video")]
     ]
     daily_limit = get_user_daily_limit(update.message.chat_id)
