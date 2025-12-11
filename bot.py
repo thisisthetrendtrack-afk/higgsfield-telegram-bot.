@@ -6,6 +6,7 @@ import string
 import random
 from datetime import datetime, timedelta
 import psycopg2
+from nano_banana_handler import t2i_nano_handler
 from psycopg2.extras import RealDictCursor
 from telegram.ext import (
     CommandHandler,
