@@ -226,7 +226,7 @@ def get_video_model_keyboard():
 
 async def start(update, context):
     keyboard = [
-        [InlineKeyboardButton("🖼 Text → Image", callback_data="text2image")],
+        [InlineKeyboardButton("🖼 Text → Image (Standard)", callback_data="text2image")],
         [InlineKeyboardButton("🤖 Text → Image (Nano Banana)", callback_data="text2image_nano")],
         [InlineKeyboardButton("🎥 Image → Video", callback_data="image2video")]
     ]
@@ -439,16 +439,25 @@ async def button_handler(update, context):
                 parse_mode="Markdown"
             )
         return
-    if data in ["text2image", "image2video"]:
+    # Handle standard text2image, nano text2image, and image2video
+    if data in ["text2image", "image2video", "text2image_nano"]:
         if data == "text2image":
-            user_sessions[chat_id] = {"mode": data, "step": "waiting_ratio"}
+            user_sessions[chat_id] = {"mode": "text2image", "step": "waiting_ratio"}
             await q.edit_message_text(
                 "🖼 *Text to Image Mode*\n\nSelect your preferred aspect ratio:",
                 parse_mode="Markdown",
                 reply_markup=get_ratio_keyboard()
             )
+        elif data == "text2image_nano":
+            # mark session to use Nano Banana provider
+            user_sessions[chat_id] = {"mode": "text2image", "step": "waiting_ratio", "nano_banana": True}
+            await q.edit_message_text(
+                "🤖 *Nano Banana — Text to Image Mode*\n\nSelect your preferred aspect ratio:",
+                parse_mode="Markdown",
+                reply_markup=get_ratio_keyboard()
+            )
         elif data == "image2video":
-            user_sessions[chat_id] = {"mode": data, "step": "waiting_model"}
+            user_sessions[chat_id] = {"mode": "image2video", "step": "waiting_model"}
             await q.edit_message_text(
                 "🎥 *Image to Video Mode*\n\n*Choose your video quality:*\n\n⚡ Fast - Quick generation\n🎨 Standard - Higher quality",
                 parse_mode="Markdown",
@@ -521,6 +530,45 @@ async def text_handler(update, context):
     model_id = ""
     status_msg = await update.message.reply_text("⏳ Initializing...")
     aspect_ratio = session.get("aspect_ratio", "1:1")
+
+    # --- Modified: if session requests Nano Banana, call it and return early ---
+    if session["mode"] == "text2image" and session.get("nano_banana"):
+        # Use Nano Banana API for text->image
+        try:
+            await update.message.reply_text("⏳ Generating image with Nano Banana…")
+            loop = asyncio.get_event_loop()
+            # call blocking API in executor
+            from nano_banana_api import generate_nano_image, NanoBananaError
+
+            size_map = {"9:16": "1024x2048", "16:9": "2048x1024", "1:1": "1024x1024"}
+            size = size_map.get(aspect_ratio, "1024x1024")
+
+            image_bytes = await loop.run_in_executor(None, generate_nano_image, text, size)
+
+            import io
+            bio = io.BytesIO(image_bytes)
+            bio.name = "nano.png"
+            bio.seek(0)
+
+            increment_usage(chat_id)
+
+            # Send as document (preserve quality). Use reply_photo if you prefer preview.
+            await update.message.reply_document(document=bio, caption=f"Generated with Nano Banana:\n{(text[:200])}")
+
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+            except:
+                pass
+            return
+        except Exception as e:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+            except:
+                pass
+            await update.message.reply_text(f"❌ Nano Banana error: {e}")
+            return
+
+    # --- Existing HuggingFace / Higgsfield flow (unchanged) ---
     if session["mode"] == "text2image":
         model_id = "higgsfield-ai/soul/standard"
         payload = {"prompt": text, "aspect_ratio": aspect_ratio}
@@ -762,6 +810,8 @@ async def admin_broadcast(update, context):
 def register_handlers(app):
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("image", command_image))
+    # optional nano direct command (keeps existing flows intact)
+    app.add_handler(CommandHandler("nano", t2i_nano_handler))
     app.add_handler(CommandHandler("video", command_video))
     app.add_handler(CommandHandler("plans", command_plans))
     app.add_handler(CommandHandler("redeem", command_redeem))
