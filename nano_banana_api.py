@@ -1,91 +1,76 @@
 # nano_banana_api.py
+# Simple ModelsLab Nano Banana text-to-image API wrapper
 
-import requests
-import json
 import os
+import requests
 import base64
 
 
-class NanoBananaAPI:
+class NanoBananaError(Exception):
+    pass
+
+
+MODELSLAB_ENDPOINT = "https://modelslab.com/api/v7/images/text-to-image"
+
+
+def generate_nano_image(prompt: str, size: str = "1024x1024") -> bytes:
     """
-    API Wrapper for Nano Banana Pro model.
-    Endpoints:
-      - POST /createTask
-      - GET /recordInfo
+    Generate an image using ModelsLab Nano Banana Pro.
+    Returns raw image bytes.
     """
 
-    BASE_URL = "https://api.kie.ai/api/v1/jobs"
+    api_key = os.getenv("NANO_BANANA_API_KEY")
+    if not api_key:
+        raise NanoBananaError("Missing NANO_BANANA_API_KEY environment variable")
 
-    def __init__(self, api_key=None):
-        # Read API key from environment variable
-        self.api_key = api_key or os.getenv("NANO_BANANA_API_KEY")
+    payload = {
+        "model": "nano-banana-pro",
+        "prompt": prompt,
+        "size": size
+    }
 
-        if not self.api_key:
-            raise Exception(
-                "Missing API Key! Set NANO_BANANA_API_KEY in Railway Variables."
-            )
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
 
-        self.headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
+    response = requests.post(
+        MODELSLAB_ENDPOINT,
+        json=payload,
+        headers=headers,
+        timeout=60
+    )
 
-    # ---------------------------------------------------
-    # CREATE GENERATION TASK
-    # ---------------------------------------------------
-    def create_task(
-        self,
-        prompt: str,
-        image_bytes: bytes | None = None,
-        aspect_ratio: str = "1:1",
-        resolution: str = "1K",
-        output_format: str = "png",
-        callback_url: str | None = None
-    ):
-        """
-        Creates a Nano Banana Pro generation job.
-        """
+    if response.status_code != 200:
+        try:
+            return response.json()
+        except:
+            raise NanoBananaError(f"API error: {response.text}")
 
-        payload = {
-            "model": "nano-banana-pro",
-            "input": {
-                "prompt": prompt,
-                "image_input": [],
-                "aspect_ratio": aspect_ratio,
-                "resolution": resolution,
-                "output_format": output_format
-            }
-        }
+    data = response.json()
 
-        # Add callback URL if user wants it
-        if callback_url:
-            payload["callBackUrl"] = callback_url
+    # --- HANDLE ALL POSSIBLE MODELSLAB RESPONSES ---
 
-        # If using image → convert to base64
-        if image_bytes:
-            b64 = base64.b64encode(image_bytes).decode("utf-8")
-            payload["input"]["image_input"] = [b64]
+    # Case 1: direct base64 field
+    if "image_base64" in data:
+        return base64.b64decode(data["image_base64"])
 
-        response = requests.post(
-            f"{self.BASE_URL}/createTask",
-            headers=self.headers,
-            data=json.dumps(payload)
-        )
+    # Case 2: images: [{ b64 }]
+    if "images" in data and isinstance(data["images"], list):
+        first = data["images"][0]
+        if "b64" in first:
+            return base64.b64decode(first["b64"])
+        if "url" in first:
+            img = requests.get(first["url"])
+            return img.content
 
-        return response.json()
+    # Case 3: data: [{ b64_json }]
+    if "data" in data:
+        first = data["data"][0]
+        if "b64_json" in first:
+            return base64.b64decode(first["b64_json"])
+        if "url" in first:
+            img = requests.get(first["url"])
+            return img.content
 
-    # ---------------------------------------------------
-    # QUERY TASK STATUS
-    # ---------------------------------------------------
-    def check_task(self, task_id: str):
-        """
-        Polls job status by taskId.
-        """
-
-        response = requests.get(
-            f"{self.BASE_URL}/recordInfo",
-            headers={"Authorization": f"Bearer {self.api_key}"},
-            params={"taskId": task_id}
-        )
-
-        return response.json()
+    raise NanoBananaError("Unexpected API response – no image found")
