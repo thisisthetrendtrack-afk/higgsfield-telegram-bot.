@@ -1,3 +1,4 @@
+import functools
 import os
 import json
 import asyncio
@@ -276,7 +277,9 @@ async def run_generation_in_background(context, chat_id, user_name, mode, prompt
                 status_msg = None
 
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, gen_func, prompt, *gen_args, **gen_kwargs)
+            # use functools.partial to bind positional + keyword args, then run the partial in the executor
+callable_fn = functools.partial(gen_func, prompt, *gen_args, **gen_kwargs)
+result = await loop.run_in_executor(None, callable_fn)
 
             video_bytes = None
             final_url = None
