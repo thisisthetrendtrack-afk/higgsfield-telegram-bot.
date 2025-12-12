@@ -1,98 +1,101 @@
 # hailuo_api.py
 import os
 import requests
-import json
-from typing import Optional
+import time
+import logging
+
+logger = logging.getLogger(__name__)
+
+ENDPOINT = os.getenv("HAILUO_ENDPOINT", "https://modelslab.com/api/v7/video-fusion/text-to-video")
+MODELSLAB_KEY = os.getenv("MODELSLAB_KEY") or os.getenv("MODELSLAB_API_KEY") or os.getenv("HAILUO_API_KEY")
+HAILUO_MODEL = os.getenv("HAILUO_MODEL")  # REQUIRED: exact model id string from ModelsLab
 
 class HailuoError(Exception):
     pass
 
-ENDPOINT = os.getenv("HAILUO_ENDPOINT", "https://modelslab.com/api/v7/video-fusion/text-to-video")
-DEFAULT_MODEL_ID = os.getenv("HAILUO_MODEL", "hailuo-text-to-video")  # override via env
-
-def _fetch_url(url: str, timeout: int = 60) -> bytes:
-    r = requests.get(url, timeout=timeout, stream=True)
+def _download_url(url: str, timeout=300) -> bytes:
+    r = requests.get(url, stream=True, timeout=timeout)
     if r.status_code != 200:
-        raise HailuoError(f"Failed to fetch URL {url}: HTTP {r.status_code}")
+        raise HailuoError(f"Failed to download asset {url}: HTTP {r.status_code}")
     return r.content
 
-def generate_hailuo_video(prompt: str, duration: int = 6, size: str = "720x1280", timeout: int = 120) -> bytes:
+def generate_hailuo_video(prompt: str, duration: int = 6, size: str = "720x1280", model_id: str | None = None, timeout: int = 600) -> bytes:
     """
     Call ModelsLab text->video endpoint and return raw video bytes.
-    - Requires env var HAILUO_API_KEY (name below). (See bot.py usage)
-    - Optional env var HAILUO_MODEL to override model_id.
-    - duration in seconds (default 6)
-    - size like "720x1280" (height x width) depending on API contract
+    Requires environment:
+      - MODELSLAB_KEY  (your ModelsLab API key)
+      - HAILUO_MODEL   (exact model id string — required)
     """
-    api_key = os.getenv("HAILUO_API_KEY") or os.getenv("NANO_BANANA_API_KEY")
-    if not api_key:
-        raise HailuoError("Missing HAILUO_API_KEY environment variable")
+    key = MODELSLAB_KEY
+    if not key:
+        raise HailuoError("Missing MODELSLAB_KEY environment variable")
 
-    model_id = os.getenv("HAILUO_MODEL", DEFAULT_MODEL_ID)
-    if not model_id:
-        raise HailuoError("Missing model id: set HAILUO_MODEL environment variable")
+    model = model_id or HAILUO_MODEL
+    if not model:
+        raise HailuoError("Missing HAILUO_MODEL environment variable (set to the exact model id)")
 
     payload = {
-        "key": api_key,
-        "model_id": model_id,
+        "key": key,
+        "model_id": model,
         "prompt": prompt,
-        # endpoint might accept additional options — keep sensible defaults
-        "duration": duration,
+        "duration": str(duration),
         "size": size
     }
 
-    headers = {"Content-Type": "application/json"}
-    resp = requests.post(ENDPOINT, json=payload, headers=headers, timeout=timeout)
+    logger.info("Hailuo request -> endpoint=%s model_id=%s duration=%s size=%s", ENDPOINT, model, duration, size)
 
-    if resp.status_code != 200:
-        try:
-            data = resp.json()
-            raise HailuoError(f"API error: {data}")
-        except Exception:
-            raise HailuoError(f"HTTP error {resp.status_code}: {resp.text[:500]}")
-
-    # Parse JSON response
+    resp = requests.post(ENDPOINT, json=payload, timeout=timeout)
+    content_type = resp.headers.get("Content-Type", "")
+    # Try to parse JSON first (most responses are JSON)
     try:
         data = resp.json()
     except Exception:
-        # maybe the endpoint returned raw bytes (unlikely). fallback:
-        content_type = resp.headers.get("Content-Type", "")
-        if content_type.startswith("video/") or content_type.startswith("application/octet-stream"):
+        # If response isn't JSON but is video bytes (rare), return directly
+        if content_type.startswith("video/") or content_type == "application/octet-stream":
             return resp.content
-        raise HailuoError("Unexpected non-JSON response from Hailuo API")
+        raise HailuoError(f"Non-JSON response from ModelsLab: HTTP {resp.status_code} - {resp.text[:1000]}")
 
-    # Common ModelsLab response shapes:
-    # - "output": ["https://.../result.mp4"]
-    # - "proxy_links": [...]
-    # - "video" : { "url": "..." } or "videos":[ "url" ]
-    # - or data.results etc.
+    # If ModelsLab reported an error, include whole JSON for debugging
+    if isinstance(data, dict) and data.get("status") == "error":
+        # return a helpful error with the raw API JSON so you can see 'model_id' messages
+        raise HailuoError(f"ModelsLab API error: {data}")
 
-    # 1) output / proxy_links top-level lists
-    for list_key in ("output", "proxy_links", "outputs", "proxyLinks"):
-        arr = data.get(list_key) if isinstance(data, dict) else None
+    # Common response patterns:
+    # 1) immediate URL field
+    for keyname in ("video_url", "output", "output_url", "result", "url"):
+        v = data.get(keyname)
+        if isinstance(v, str) and v.startswith("http"):
+            return _download_url(v)
+
+    # 2) lists with urls
+    for listname in ("outputs", "proxy_links", "output_links", "results", "videos"):
+        arr = data.get(listname)
         if isinstance(arr, list) and len(arr) > 0 and isinstance(arr[0], str) and arr[0].startswith("http"):
-            return _fetch_url(arr[0])
+            return _download_url(arr[0])
+        if isinstance(arr, list) and len(arr) > 0 and isinstance(arr[0], dict):
+            # find url inside dict
+            for k in ("url", "video_url", "output"):
+                if arr[0].get(k) and isinstance(arr[0].get(k), str) and arr[0].get(k).startswith("http"):
+                    return _download_url(arr[0].get(k))
 
-    # 2) video fields
-    if isinstance(data, dict):
-        # video: { "url": "..." }
-        v = data.get("video") or data.get("result") or data.get("output_video")
-        if isinstance(v, dict) and isinstance(v.get("url"), str):
-            return _fetch_url(v["url"])
-        if isinstance(v, list) and len(v) > 0 and isinstance(v[0], str) and v[0].startswith("http"):
-            return _fetch_url(v[0])
-
-    # 3) nested arrays like data["data"][0]["url"] or data["data"][0]["video_url"]
-    for arr_key in ("data", "results", "artifacts"):
-        arr = data.get(arr_key) if isinstance(data, dict) else None
+    # 3) nested "data" or "results" arrays
+    for arrkey in ("data", "results", "artifacts"):
+        arr = data.get(arrkey)
         if isinstance(arr, list) and len(arr) > 0:
             first = arr[0]
             if isinstance(first, dict):
                 for k in ("url", "video_url", "output", "result"):
                     if k in first and isinstance(first[k], str) and first[k].startswith("http"):
-                        return _fetch_url(first[k])
+                        return _download_url(first[k])
             elif isinstance(first, str) and first.startswith("http"):
-                return _fetch_url(first)
+                return _download_url(first)
 
-    # Nothing found
-    raise HailuoError(f"Unexpected response format from Hailuo API: {json.dumps(data)[:1000]}")
+    # 4) If the API returned a task id / job id for async processing, surface it so the caller can poll
+    if isinstance(data, dict):
+        # common key names that may contain job/task id
+        for jobkey in ("taskId", "task_id", "job_id", "jobId", "id"):
+            if data.get("data") and isinstance(data.get("data"), dict) and data["data"].get(jobkey):
+                raise HailuoError(f"API returned async task id. You must poll the provider. Received: {data}")
+
+    # If we reached here, we don't know how to extract the video — return full JSON for debugging
+    raise HailuoError(f"Unexpected response format from Hailuo API: {data}")
