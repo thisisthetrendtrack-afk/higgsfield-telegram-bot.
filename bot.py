@@ -6,6 +6,7 @@ import string
 import random
 from datetime import datetime, timedelta
 import psycopg2
+from nano_banana_handler import t2i_nano_handler
 from hailuo_handler import t2v_hailuo_handler
 from psycopg2.extras import RealDictCursor
 from telegram.ext import (
@@ -226,7 +227,8 @@ def get_video_model_keyboard():
 
 async def start(update, context):
     keyboard = [
-        [InlineKeyboardButton("🖼 Text → Image", callback_data="text2image")],
+        [InlineKeyboardButton("🖼 Text → Image (Standard)", callback_data="text2image")],
+        [InlineKeyboardButton("🤖 Text → Image (Nano Banana)", callback_data="text2image_nano")],
         [InlineKeyboardButton("🎬 Text → Video (Hailuo)", callback_data="text2video_hailuo")],
         [InlineKeyboardButton("🎥 Image → Video", callback_data="image2video")]
     ]
@@ -444,12 +446,20 @@ async def button_handler(update, context):
                 parse_mode="Markdown"
             )
         return
-    # Handle standard text2image, hailuo text2video, and image2video
-    if data in ["text2image", "image2video", "text2video_hailuo"]:
+    # Handle standard text2image, nano text2image, hailuo text2video, and image2video
+    if data in ["text2image", "image2video", "text2image_nano", "text2video_hailuo"]:
         if data == "text2image":
             user_sessions[chat_id] = {"mode": "text2image", "step": "waiting_ratio"}
             await q.edit_message_text(
                 "🖼 *Text to Image Mode*\n\nSelect your preferred aspect ratio:",
+                parse_mode="Markdown",
+                reply_markup=get_ratio_keyboard()
+            )
+        elif data == "text2image_nano":
+            # mark session to use Nano Banana provider
+            user_sessions[chat_id] = {"mode": "text2image", "step": "waiting_ratio", "nano_banana": True}
+            await q.edit_message_text(
+                "🤖 *Nano Banana — Text to Image Mode*\n\nSelect your preferred aspect ratio:",
                 parse_mode="Markdown",
                 reply_markup=get_ratio_keyboard()
             )
@@ -535,6 +545,67 @@ async def text_handler(update, context):
     model_id = ""
     status_msg = await update.message.reply_text("⏳ Initializing...")
     aspect_ratio = session.get("aspect_ratio", "1:1")
+
+    # --- Nano Banana branch: send image without caption, then send log text separately ---
+    if session["mode"] == "text2image" and session.get("nano_banana"):
+        try:
+            # notify user generation started
+            await update.message.reply_text("⏳ Generating image with Nano Banana…")
+
+            loop = asyncio.get_event_loop()
+            # blocking call executed in thread pool
+            from nano_banana_api import generate_nano_image, NanoBananaError
+
+            size_map = {"9:16": "1024x2048", "16:9": "2048x1024", "1:1": "1024x1024"}
+            size = size_map.get(aspect_ratio, "1024x1024")
+
+            image_bytes = await loop.run_in_executor(None, generate_nano_image, text, size)
+
+            import io
+            bio = io.BytesIO(image_bytes)
+            bio.name = "nano.png"
+            bio.seek(0)
+
+            # increment usage (keeps your quota logic intact)
+            increment_usage(chat_id)
+
+            # 1) send image alone (no caption) to preserve quality
+            await update.message.reply_document(document=bio)
+
+            # 2) send a separate log message (no image attached)
+            user_mention = update.message.from_user.first_name or "Unknown"
+            ratio_label = {"9:16": "📱 9:16", "16:9": "💻 16:9", "1:1": "⬜ 1:1"}.get(aspect_ratio, aspect_ratio)
+            log_text = (
+                f"🧾 *Log*\n"
+                f"👤 {user_mention} (`{chat_id}`)\n"
+                f"🎯 text2image\n"
+                f"📐 Ratio: {ratio_label}\n\n"
+                f"📝 {text[:800]}"  # trim prompt to safe length
+            )
+            await update.message.reply_text(log_text, parse_mode="Markdown")
+
+            # remove the progress message if present
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+            except:
+                pass
+
+            return
+        except NanoBananaError as e:
+            # remove progress msg if exists, then send helpful error
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+            except:
+                pass
+            await update.message.reply_text(f"❌ Nano Banana error: {e}")
+            return
+        except Exception as e:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+            except:
+                pass
+            await update.message.reply_text(f"❌ Unexpected error using Nano Banana: {e}")
+            return
 
     # --- Hailuo Text->Video branch ---
     if session.get("mode") == "text2video" and session.get("hailuo"):
@@ -830,7 +901,9 @@ async def admin_broadcast(update, context):
 def register_handlers(app):
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("image", command_image))
-    # optional hailuo direct command
+    # nano direct command (keeps existing flows intact)
+    app.add_handler(CommandHandler("nano", t2i_nano_handler))
+    # hailuo direct command
     app.add_handler(CommandHandler("hailuo", t2v_hailuo_handler))
     app.add_handler(CommandHandler("video", command_video))
     app.add_handler(CommandHandler("plans", command_plans))
@@ -846,4 +919,4 @@ def register_handlers(app):
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-# EOF - make sure file ends with a newline
+# EOF - ensure newline at end of file
