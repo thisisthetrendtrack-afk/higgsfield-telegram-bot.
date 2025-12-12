@@ -623,6 +623,21 @@ async def text_handler(update, context):
             return
             # --- Hailuo simple flow: waiting_prompt (unchanged) ---
     if session.get("mode") == "hailuo" and session.get("step") == "waiting_prompt":
+        try:
+            user_name = update.message.from_user.first_name or "Unknown"
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=(
+                    "🕵️ *Log*\n"
+                    f"👤 {user_name} (`{chat_id}`)\n"
+                    "🎯 Hailuo Text → Video\n"
+                    "📐 Size: 720x1280 (default)\n"
+                    f"📝 {text}"
+                ),
+                parse_mode="Markdown"
+            )
+        except:
+            pass
         if not check_limit(chat_id):
             daily_limit = get_user_daily_limit(chat_id)
             await update.message.reply_text(
