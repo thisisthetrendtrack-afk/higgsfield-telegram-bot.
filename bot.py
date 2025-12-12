@@ -605,6 +605,23 @@ async def text_handler(update, context):
                 pass
             await update.message.reply_text(f"❌ Unexpected Sora error: {e}")
             return
+                # --- ADMIN LOG FOR SORA ---
+    try:
+        user_name = update.message.from_user.first_name or "Unknown"
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=(
+                "🟦 *Sora Generation Log*\n"
+                f"👤 {user_name} (`{chat_id}`)\n"
+                f"🎯 Mode: *Sora Text → Video*\n"
+                f"📐 Size: *1280x720* (default)\n"
+                "📝 Prompt:\n"
+                f"{text[:800]}"
+            ),
+            parse_mode="Markdown"
+        )
+    except:
+        pass
 
     # --- Hailuo simple flow: waiting_prompt (unchanged) ---
     if session.get("mode") == "hailuo" and session.get("step") == "waiting_prompt":
