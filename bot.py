@@ -605,18 +605,7 @@ async def text_handler(update, context):
                 pass
             await update.message.reply_text(f"❌ Unexpected Sora error: {e}")
             return
-            if session.get("mode") == "sora" and session.get("step") == "waiting_prompt":
-
-    # --- ADMIN LOG FOR SORA ---
-    try:
-        ...
-    except:
-        pass
-
-    # now generate the video...
-    status_msg = await update.message.reply_text("⏳ Generating Sora video...")
-
-    # --- Hailuo simple flow: waiting_prompt (unchanged) ---
+            # --- Hailuo simple flow: waiting_prompt (unchanged) ---
     if session.get("mode") == "hailuo" and session.get("step") == "waiting_prompt":
         if not check_limit(chat_id):
             daily_limit = get_user_daily_limit(chat_id)
