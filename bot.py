@@ -7,7 +7,7 @@ import random
 from datetime import datetime, timedelta
 import psycopg2
 from psycopg2.extras import RealDictCursor
-
+from quota_manager import QM
 # keep your existing nano handler import
 from nano_banana_handler import t2i_nano_handler
 
