@@ -532,41 +532,60 @@ async def text_handler(update, context):
     aspect_ratio = session.get("aspect_ratio", "1:1")
 
     # --- Modified: if session requests Nano Banana, call it and return early ---
-    if session["mode"] == "text2image" and session.get("nano_banana"):
-        # Use Nano Banana API for text->image
+    # --- Nano Banana branch: send image without caption, then send log text separately ---
+if session["mode"] == "text2image" and session.get("nano_banana"):
+    try:
+        await update.message.reply_text("⏳ Generating image with Nano Banana…")
+        loop = asyncio.get_event_loop()
+        from nano_banana_api import generate_nano_image, NanoBananaError
+
+        size_map = {"9:16": "1024x2048", "16:9": "2048x1024", "1:1": "1024x1024"}
+        size = size_map.get(aspect_ratio, "1024x1024")
+
+        image_bytes = await loop.run_in_executor(None, generate_nano_image, text, size)
+
+        import io
+        bio = io.BytesIO(image_bytes)
+        bio.name = "nano.png"
+        bio.seek(0)
+
+        increment_usage(chat_id)
+
+        # 1) send image alone (no caption)
+        sent_msg = await update.message.reply_document(document=bio)
+
+        # 2) then send a separate log message (no image attached)
+        user_mention = update.message.from_user.first_name or "Unknown"
+        log_text = (
+            f"🧾 *Log*\n"
+            f"👤 {user_mention} (`{chat_id}`)\n"
+            f"🎯 text2image\n"
+            f"📐 Ratio: {aspect_ratio}\n\n"
+            f"📝 {text[:800]}"  # trim prompt to safe length
+        )
+        await update.message.reply_text(log_text, parse_mode="Markdown")
+
+        # cleanup progress message if present
         try:
-            await update.message.reply_text("⏳ Generating image with Nano Banana…")
-            loop = asyncio.get_event_loop()
-            # call blocking API in executor
-            from nano_banana_api import generate_nano_image, NanoBananaError
+            await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+        except:
+            pass
 
-            size_map = {"9:16": "1024x2048", "16:9": "2048x1024", "1:1": "1024x1024"}
-            size = size_map.get(aspect_ratio, "1024x1024")
-
-            image_bytes = await loop.run_in_executor(None, generate_nano_image, text, size)
-
-            import io
-            bio = io.BytesIO(image_bytes)
-            bio.name = "nano.png"
-            bio.seek(0)
-
-            increment_usage(chat_id)
-
-            # Send as document (preserve quality). Use reply_photo if you prefer preview.
-            await update.message.reply_document(document=bio, caption=f"Generated with Nano Banana:\n{(text[:200])}")
-
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
-            except:
-                pass
-            return
-        except Exception as e:
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
-            except:
-                pass
-            await update.message.reply_text(f"❌ Nano Banana error: {e}")
-            return
+        return
+    except NanoBananaError as e:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+        except:
+            pass
+        await update.message.reply_text(f"❌ Nano Banana error: {e}")
+        return
+    except Exception as e:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+        except:
+            pass
+        await update.message.reply_text(f"❌ Unexpected error using Nano Banana: {e}")
+        return
 
     # --- Existing HuggingFace / Higgsfield flow (unchanged) ---
     if session["mode"] == "text2image":
