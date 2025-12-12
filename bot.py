@@ -120,6 +120,25 @@ def migrate_from_json():
         print("✅ Migration complete!")
     except Exception as e:
         print(f"⚠️ Migration error: {e}")
+        import base64
+import requests
+
+def nano_banana_edit(image_bytes, prompt):
+    url = "https://modelslab.com/api/v6/images/img2img"
+
+    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+
+    payload = {
+        "key": os.getenv("MODELSLAB_API_KEY"),
+        "model_id": os.getenv("NANO_BANANA_PRO_MODEL", "nano-banana-pro"),
+        "prompt": prompt,
+        "init_image": image_b64,
+        "strength": 0.7,
+        "samples": 1
+    }
+
+    r = requests.post(url, json=payload)
+    return r.json()
 
 # session store (shared across handlers)
 user_sessions = {}
