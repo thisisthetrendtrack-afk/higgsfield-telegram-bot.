@@ -7,6 +7,7 @@ import random
 from datetime import datetime, timedelta
 import psycopg2
 from nano_banana_handler import t2i_nano_handler
+from hailuo_handler import t2v_hailuo_handler
 from psycopg2.extras import RealDictCursor
 from telegram.ext import (
     CommandHandler,
@@ -228,6 +229,7 @@ async def start(update, context):
     keyboard = [
         [InlineKeyboardButton("🖼 Text → Image (Standard)", callback_data="text2image")],
         [InlineKeyboardButton("🤖 Text → Image (Nano Banana)", callback_data="text2image_nano")],
+        [InlineKeyboardButton("🎥 Text → Video (Hailuo)", callback_data="text2video_hailuo")],
         [InlineKeyboardButton("🎥 Image → Video", callback_data="image2video")]
     ]
     daily_limit = get_user_daily_limit(update.message.chat_id)
@@ -438,9 +440,14 @@ async def button_handler(update, context):
                 f"✅ Aspect Ratio: *{ratio_label}*\n\n📷 Now send me the *photo* you want to animate:",
                 parse_mode="Markdown"
             )
+        elif session["mode"] == "text2video":
+            await q.edit_message_text(
+                f"✅ Aspect Ratio: *{ratio_label}*\n\n📝 Now send your *text prompt* to generate a video:",
+                parse_mode="Markdown"
+            )
         return
-    # Handle standard text2image, nano text2image, and image2video
-    if data in ["text2image", "image2video", "text2image_nano"]:
+    # Handle standard text2image, nano text2image, hailuo text2video, and image2video
+    if data in ["text2image", "image2video", "text2image_nano", "text2video_hailuo"]:
         if data == "text2image":
             user_sessions[chat_id] = {"mode": "text2image", "step": "waiting_ratio"}
             await q.edit_message_text(
@@ -453,6 +460,14 @@ async def button_handler(update, context):
             user_sessions[chat_id] = {"mode": "text2image", "step": "waiting_ratio", "nano_banana": True}
             await q.edit_message_text(
                 "🤖 *Nano Banana — Text to Image Mode*\n\nSelect your preferred aspect ratio:",
+                parse_mode="Markdown",
+                reply_markup=get_ratio_keyboard()
+            )
+        elif data == "text2video_hailuo":
+            # start text->video flow (Hailuo)
+            user_sessions[chat_id] = {"mode": "text2video", "step": "waiting_ratio", "hailuo": True}
+            await q.edit_message_text(
+                "🎬 *Hailuo Text → Video Mode*\n\nSelect your preferred aspect ratio (then send your prompt):",
                 parse_mode="Markdown",
                 reply_markup=get_ratio_keyboard()
             )
@@ -531,8 +546,7 @@ async def text_handler(update, context):
     status_msg = await update.message.reply_text("⏳ Initializing...")
     aspect_ratio = session.get("aspect_ratio", "1:1")
 
-    # --- Modified: if session requests Nano Banana, call it and return early ---
-    # Replaced branch: now sends image first (no caption) then sends log text separately
+    # --- Nano Banana branch: send image without caption, then send log text separately ---
     if session["mode"] == "text2image" and session.get("nano_banana"):
         try:
             # notify user generation started
@@ -577,20 +591,57 @@ async def text_handler(update, context):
                 pass
 
             return
-        except NanoBananaError as e:
-            # remove progress msg if exists, then send helpful error
+        except Exception as e:
             try:
                 await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
             except:
                 pass
             await update.message.reply_text(f"❌ Nano Banana error: {e}")
             return
+
+    # --- Hailuo Text->Video branch ---
+    if session.get("mode") == "text2video" and session.get("hailuo"):
+        try:
+            await update.message.reply_text("⏳ Generating video with Hailuo… this may take a bit.")
+            loop = asyncio.get_event_loop()
+            from hailuo_api import generate_hailuo_video, HailuoError
+
+            # Map aspect ratio to size
+            size_map = {"9:16": "720x1280", "16:9": "1280x720", "1:1": "720x720"}
+            size = size_map.get(aspect_ratio, "720x1280")
+            duration = 6
+
+            video_bytes = await loop.run_in_executor(None, generate_hailuo_video, text, duration, size)
+
+            import io
+            bio = io.BytesIO(video_bytes)
+            bio.name = "hailuo.mp4"
+            bio.seek(0)
+
+            increment_usage(chat_id)
+
+            # send video file
+            await update.message.reply_video(video=bio)
+
+            # optional follow-up log
+            try:
+                log_text = f"🧾 Hailuo video generated\n👤 {update.message.from_user.first_name or 'Unknown'} (`{chat_id}`)\n📐 Ratio: {aspect_ratio}\n⏱ Duration: {duration}s"
+                await update.message.reply_text(log_text, parse_mode="Markdown")
+            except:
+                pass
+
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+            except:
+                pass
+
+            return
         except Exception as e:
             try:
                 await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
             except:
                 pass
-            await update.message.reply_text(f"❌ Unexpected error using Nano Banana: {e}")
+            await update.message.reply_text(f"❌ Hailuo error: {e}")
             return
 
     # --- Existing HuggingFace / Higgsfield flow (unchanged) ---
@@ -837,16 +888,11 @@ def register_handlers(app):
     app.add_handler(CommandHandler("image", command_image))
     # optional nano direct command (keeps existing flows intact)
     app.add_handler(CommandHandler("nano", t2i_nano_handler))
+    # optional hailuo direct command
+    app.add_handler(CommandHandler("hailuo", t2v_hailuo_handler))
     app.add_handler(CommandHandler("video", command_video))
     app.add_handler(CommandHandler("plans", command_plans))
     app.add_handler(CommandHandler("redeem", command_redeem))
     app.add_handler(CommandHandler("help", command_help))
     app.add_handler(CommandHandler("quota", command_quota))
-    app.add_handler(CommandHandler("myplan", command_myplan))
-    app.add_handler(CommandHandler("genkey", admin_genkey))
-    app.add_handler(CommandHandler("members", admin_members))
-    app.add_handler(CommandHandler("broadcast", admin_broadcast))
-    app.add_handler(CommandHandler("dbstatus", admin_dbstatus))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    app.add
