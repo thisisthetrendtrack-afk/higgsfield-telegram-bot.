@@ -10,6 +10,8 @@ import psycopg2
 from nano_banana_handler import t2i_nano_handler
 from psycopg2.extras import RealDictCursor
 
+# Add under your other constants
+LOG_VERBOSE = os.getenv("LOG_VERBOSE", "1") == "1"
 # Sora integration
 from sora_api import generate_sora_video, SoraError
 
