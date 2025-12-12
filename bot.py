@@ -8,8 +8,11 @@ from datetime import datetime, timedelta
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
-# Provider-specific helpers (assumes these files exist in your repo)
+# keep your existing nano handler import
 from nano_banana_handler import t2i_nano_handler
+
+# Sora & Hailuo helper modules (assumed present in repo)
+# generate_* should be blocking functions that return bytes or (bytes, url)
 from sora_api import generate_sora_video, SoraError
 from hailuo_api import generate_hailuo_video, HailuoError
 
@@ -65,7 +68,7 @@ def init_db():
                 used_date TIMESTAMP
             )
         """)
-        # optional generation_logs table (safe to create even if not used)
+        # optional generation_logs table for auditing
         cur.execute("""
             CREATE TABLE IF NOT EXISTS generation_logs (
                 id SERIAL PRIMARY KEY,
@@ -169,7 +172,7 @@ def check_limit(chat_id):
         user_data = cur.fetchone()
         if not user_data:
             cur.execute(
-                "INSERT INTO users (chat_id, count, date) VALUES (%s, 0, %s)",
+                "INSERT INTO users (chat_id, count, date) VALUES (%s, 0, %s) ON CONFLICT (chat_id) DO NOTHING",
                 (chat_id, today)
             )
             conn.commit()
@@ -194,8 +197,16 @@ def check_limit(chat_id):
         cur.close()
         conn.close()
         return True
-    except:
-        return True
+    except Exception as e:
+        # notify admin and deny by default (safer)
+        try:
+            import traceback
+            from telegram import Bot
+            bot = Bot(token=os.getenv("TELEGRAM_TOKEN"))
+            bot.send_message(chat_id=ADMIN_ID, text=f"⚠️ check_limit DB error: {e}\n{traceback.format_exc()}")
+        except:
+            pass
+        return False
 
 def increment_usage(chat_id):
     if chat_id == ADMIN_ID:
@@ -203,6 +214,7 @@ def increment_usage(chat_id):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
+        cur.execute("INSERT INTO users (chat_id, count, date) VALUES (%s, 0, CURRENT_DATE) ON CONFLICT (chat_id) DO NOTHING", (chat_id,))
         cur.execute(
             "UPDATE users SET count = count + 1 WHERE chat_id = %s",
             (chat_id,)
@@ -210,13 +222,15 @@ def increment_usage(chat_id):
         conn.commit()
         cur.close()
         conn.close()
-    except:
-        pass
+    except Exception as e:
+        try:
+            from telegram import Bot
+            bot = Bot(token=os.getenv("TELEGRAM_TOKEN"))
+            bot.send_message(chat_id=ADMIN_ID, text=f"⚠️ increment_usage DB error: {e}")
+        except:
+            pass
 
 def log_generation(chat_id, username, mode, size, prompt, status, filesize=None, url=None):
-    """
-    Best-effort DB log for generations.
-    """
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -235,7 +249,7 @@ async def animate_progress(context, chat_id, message_id, stop_event):
         "⏳ Starting...\n[░░░░░░░░░░] 0%",
         "🎨 Sketching...\n[▓▓░░░░░░░░] 20%",
         "🎨 Coloring...\n[▓▓▓▓░░░░░░] 40%",
-        "🎬 Rendering...\n[▓▓▓▓▓▓░░░░] 60%",
+        "🎬 Rendering...\n[▓▓▓▓▓▓░░░] 60%",
         "✨ Polishing...\n[▓▓▓▓▓▓▓▓░░] 80%",
         "🚀 Finalizing...\n[▓▓▓▓▓▓▓▓▓▓] 99%"
     ]
@@ -248,7 +262,8 @@ async def animate_progress(context, chat_id, message_id, stop_event):
                 text=f"{bars[i % len(bars)]}\n\n_Please wait..._",
                 parse_mode="Markdown"
             )
-        except: pass
+        except:
+            pass
         i += 1
         await asyncio.sleep(6)
 
@@ -479,11 +494,10 @@ async def button_handler(update, context):
         elif session["mode"] == "image2video":
             await q.edit_message_text(
                 f"✅ Aspect Ratio: *{ratio_label}*\n\n📷 Now send me the *photo* you want to animate:",
-                parse_mode="Markdown",
-                reply_markup=None
+                parse_mode="Markdown"
             )
         return
-    # Handle standard text2image, nano text2image, and image2video and new text2video modes
+    # Handle multiple modes including new text2video modes
     if data in ["text2image", "image2video", "text2image_nano", "text2video_hailuo", "text2video_sora"]:
         if data == "text2image":
             user_sessions[chat_id] = {"mode": "text2image", "step": "waiting_ratio"}
@@ -564,9 +578,10 @@ async def text_handler(update, context):
             reply_markup=get_ratio_keyboard()
         )
         return
+
     # --- Sora simple flow: waiting_prompt ---
     if session.get("mode") == "sora" and session.get("step") == "waiting_prompt":
-        # 1) check limit first
+        # enforce daily limit FIRST
         if not check_limit(chat_id):
             daily_limit = get_user_daily_limit(chat_id)
             await update.message.reply_text(
@@ -577,22 +592,21 @@ async def text_handler(update, context):
             )
             return
 
-        # 2) admin log (Higgs-style)
+        # admin log
         try:
             user_name = update.message.from_user.first_name or "Unknown"
             await context.bot.send_message(
                 chat_id=ADMIN_ID,
-                text=f"🕵️ *Log*\n👤 {user_name} (`{chat_id}`)\n🎯 sora\n📐 Size: 1280x720\n📝 {text}",
+                text=f"🕵️ *Log*\n👤 {user_name} (`{chat_id}`)\n🎯 sora\n📐 Size: 1280x720\n📝 {text[:800]}",
                 parse_mode="Markdown"
             )
         except:
             pass
 
-        # 3) generate Sora video (blocking in executor)
+        # now generate Sora video (blocking call in executor)
         status_msg = await update.message.reply_text("⏳ Generating Sora video…")
         try:
             loop = asyncio.get_event_loop()
-            # generate_sora_video(prompt, duration_seconds, size) -> bytes or (bytes, url)
             result = await loop.run_in_executor(None, generate_sora_video, text, 4, "1280x720")
             video_bytes = None
             final_url = None
@@ -611,13 +625,11 @@ async def text_handler(update, context):
             tf.close()
             filesize = _os.path.getsize(tf.name)
 
-            # send file
             if filesize <= 50 * 1024 * 1024:
                 await update.message.reply_video(open(tf.name, "rb"), caption="🎥 Sora Result")
             else:
                 await update.message.reply_document(open(tf.name, "rb"), caption="🎥 Sora Result (file)")
 
-            # record log + usage
             increment_usage(chat_id)
             try:
                 user_name = update.message.from_user.first_name or "Unknown"
@@ -641,7 +653,6 @@ async def text_handler(update, context):
             except:
                 pass
             await update.message.reply_text(f"❌ Sora error: {se}")
-            # log error
             try:
                 user_name = update.message.from_user.first_name or "Unknown"
                 log_generation(chat_id, user_name, "sora", "1280x720", text, "error", url=str(se))
@@ -663,7 +674,7 @@ async def text_handler(update, context):
 
     # --- Hailuo simple flow: waiting_prompt ---
     if session.get("mode") == "hailuo" and session.get("step") == "waiting_prompt":
-        # 1) check limit first
+        # enforce daily limit FIRST
         if not check_limit(chat_id):
             daily_limit = get_user_daily_limit(chat_id)
             await update.message.reply_text(
@@ -674,18 +685,18 @@ async def text_handler(update, context):
             )
             return
 
-        # 2) admin log (Higgs-style)
+        # admin log
         try:
             user_name = update.message.from_user.first_name or "Unknown"
             await context.bot.send_message(
                 chat_id=ADMIN_ID,
-                text=f"🕵️ *Log*\n👤 {user_name} (`{chat_id}`)\n🎯 hailuo\n📐 Size: 720x1280\n📝 {text}",
+                text=f"🕵️ *Log*\n👤 {user_name} (`{chat_id}`)\n🎯 hailuo\n📐 Size: 720x1280\n📝 {text[:800]}",
                 parse_mode="Markdown"
             )
         except:
             pass
 
-        # 3) generate Hailuo video (blocking in executor)
+        # now generate Hailuo video (blocking call in executor)
         status_msg = await update.message.reply_text("⏳ Generating video with Hailuo… this may take a bit.")
         try:
             loop = asyncio.get_event_loop()
@@ -762,6 +773,7 @@ async def text_handler(update, context):
         )
         return
 
+    # global limit check for other flows (Higgsfield, Nano, image2video)
     if not check_limit(chat_id):
         daily_limit = get_user_daily_limit(chat_id)
         await update.message.reply_text(
@@ -772,15 +784,17 @@ async def text_handler(update, context):
         )
         return
 
+    # admin log for other flows (higgsfield/nano/image2video)
     try:
         user_name = update.message.from_user.first_name
         ratio = session.get("aspect_ratio", "1:1")
         await context.bot.send_message(
             chat_id=ADMIN_ID,
-            text=f"🕵️ *Log*\n👤 {user_name} (`{chat_id}`)\n🎯 {session['mode']}\n📐 Ratio: {ratio}\n📝 {text}",
+            text=f"🕵️ *Log*\n👤 {user_name} (`{chat_id}`)\n🎯 {session['mode']}\n📐 Ratio: {ratio}\n📝 {text[:800]}",
             parse_mode="Markdown"
         )
-    except: pass
+    except:
+        pass
 
     hf = HiggsfieldAPI(os.getenv("HF_KEY"), os.getenv("HF_SECRET"))
     payload = {}
@@ -788,13 +802,11 @@ async def text_handler(update, context):
     status_msg = await update.message.reply_text("⏳ Initializing...")
     aspect_ratio = session.get("aspect_ratio", "1:1")
 
-    # --- Modified: if session requests Nano Banana, call it and return early ---
+    # --- Modified: Nano Banana flow (unchanged logic) ---
     if session["mode"] == "text2image" and session.get("nano_banana"):
-        # Use Nano Banana API for text->image
         try:
             await update.message.reply_text("⏳ Generating image with Nano Banana…")
             loop = asyncio.get_event_loop()
-            # call blocking API in executor
             from nano_banana_api import generate_nano_image, NanoBananaError
 
             size_map = {"9:16": "1024x2048", "16:9": "2048x1024", "1:1": "1024x1024"}
@@ -809,7 +821,6 @@ async def text_handler(update, context):
 
             increment_usage(chat_id)
 
-            # Send as document (preserve quality). Use reply_photo if you prefer preview.
             await update.message.reply_document(document=bio, caption=f"Generated with Nano Banana:\n{(text[:200])}")
 
             try:
@@ -1083,7 +1094,6 @@ def register_handlers(app):
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-# If this module is run directly, set up app (example)
 if __name__ == "__main__":
     init_db()
     migrate_from_json()
