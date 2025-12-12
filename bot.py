@@ -1,4 +1,3 @@
-import functools
 import os
 import json
 import asyncio
@@ -35,10 +34,6 @@ logging.basicConfig(
 ADMIN_ID = 7872634386
 MAX_FREE_DAILY = 2
 DATABASE_URL = os.getenv("DATABASE_URL")
-
-# Background concurrency (adjust via env)
-MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY", "2"))
-worker_semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
 
 PLANS = {
     "starter": {"price": 2, "duration_days": 1, "daily_limit": 10, "name": "Starter (1 day)"},
@@ -249,113 +244,12 @@ def log_generation(chat_id, username, mode, size, prompt, status, filesize=None,
     except:
         pass
 
-# --------------------
-# Background worker to run blocking generation functions (Sora, Hailuo)
-# --------------------
-async def run_generation_in_background(context, chat_id, user_name, mode, prompt, gen_func, *gen_args, **gen_kwargs):
-    """
-    Generic background runner:
-      - acquires semaphore (limits concurrent gens)
-      - runs gen_func in executor (blocking)
-      - sends progress/failure/success messages to the user and admin
-      - increments usage and logs in DB inside worker (so counts are accurate)
-    gen_func: blocking function that returns bytes or (bytes, url) or url string
-    """
-    # inform user job queued (best-effort)
-    try:
-        await context.bot.send_message(chat_id=chat_id, text=f"✅ Your {mode} request is queued. I'll send the result here when it's ready.")
-    except:
-        pass
-
-    async with worker_semaphore:
-        status_msg = None
-        try:
-            # send progress message
-            try:
-                status_msg = await context.bot.send_message(chat_id=chat_id, text=f"⏳ Generating {mode} — this may take a while...")
-            except:
-                status_msg = None
-
-            loop = asyncio.get_event_loop()
-            # use functools.partial to bind positional + keyword args, then run the partial in the executor
-callable_fn = functools.partial(gen_func, prompt, *gen_args, **gen_kwargs)
-result = await loop.run_in_executor(None, callable_fn)
-
-            video_bytes = None
-            final_url = None
-            if isinstance(result, tuple):
-                video_bytes, final_url = result
-            else:
-                if isinstance(result, (bytes, bytearray)):
-                    video_bytes = result
-                elif isinstance(result, str) and result.startswith("http"):
-                    final_url = result
-
-            if video_bytes:
-                import tempfile, os as _os
-                tf = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-                tf.write(video_bytes)
-                tf.flush()
-                tf.close()
-                filesize = _os.path.getsize(tf.name)
-                try:
-                    if filesize <= 50 * 1024 * 1024:
-                        await context.bot.send_video(chat_id=chat_id, video=open(tf.name, "rb"), caption=f"🎬 {mode} result")
-                    else:
-                        await context.bot.send_document(chat_id=chat_id, document=open(tf.name, "rb"), caption=f"🎬 {mode} result (file)")
-                except Exception as e:
-                    # fallback to URL if available
-                    if final_url:
-                        await context.bot.send_message(chat_id=chat_id, text=f"✅ {mode} finished: {final_url}")
-                    else:
-                        await context.bot.send_message(chat_id=chat_id, text=f"❌ {mode} result failed to send: {e}")
-                try:
-                    increment_usage(chat_id)
-                    log_generation(chat_id, user_name, mode.lower(), gen_kwargs.get("size"), prompt, "completed", filesize=filesize, url=final_url)
-                except:
-                    pass
-                try:
-                    _os.unlink(tf.name)
-                except:
-                    pass
-            elif final_url:
-                await context.bot.send_message(chat_id=chat_id, text=f"✅ {mode} finished: {final_url}")
-                try:
-                    increment_usage(chat_id)
-                    log_generation(chat_id, user_name, mode.lower(), gen_kwargs.get("size"), prompt, "completed", filesize=None, url=final_url)
-                except:
-                    pass
-            else:
-                await context.bot.send_message(chat_id=chat_id, text=f"❌ {mode} finished but returned no output.")
-                try:
-                    log_generation(chat_id, user_name, mode.lower(), gen_kwargs.get("size"), prompt, "no_output")
-                except:
-                    pass
-
-        except Exception as e:
-            try:
-                await context.bot.send_message(chat_id=chat_id, text=f"❌ {mode} error: {e}")
-            except:
-                pass
-            try:
-                log_generation(chat_id, user_name, mode.lower(), gen_kwargs.get("size"), prompt, "error", url=str(e))
-            except:
-                pass
-        finally:
-            try:
-                if status_msg:
-                    await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
-            except:
-                pass
-
-# --------------------
-
 async def animate_progress(context, chat_id, message_id, stop_event):
     bars = [
         "⏳ Starting...\n[░░░░░░░░░░] 0%",
         "🎨 Sketching...\n[▓▓░░░░░░░░] 20%",
         "🎨 Coloring...\n[▓▓▓▓░░░░░░] 40%",
-        "🎬 Rendering...\n[▓▓▓▓▓▓░░░░] 60%",
+        "🎬 Rendering...\n[▓▓▓▓▓▓░░░] 60%",
         "✨ Polishing...\n[▓▓▓▓▓▓▓▓░░] 80%",
         "🚀 Finalizing...\n[▓▓▓▓▓▓▓▓▓▓] 99%"
     ]
@@ -368,7 +262,8 @@ async def animate_progress(context, chat_id, message_id, stop_event):
                 text=f"{bars[i % len(bars)]}\n\n_Please wait..._",
                 parse_mode="Markdown"
             )
-        except: pass
+        except:
+            pass
         i += 1
         await asyncio.sleep(6)
 
@@ -708,15 +603,73 @@ async def text_handler(update, context):
         except:
             pass
 
-        # schedule Sora generation in background and return immediately
+        # now generate Sora video (blocking call in executor)
+        status_msg = await update.message.reply_text("⏳ Generating Sora video…")
         try:
-            user_name = update.message.from_user.first_name or "Unknown"
-            asyncio.create_task(
-                run_generation_in_background(context, chat_id, user_name, "Sora", text, generate_sora_video, 4, size="1280x720")
-            )
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, generate_sora_video, text, 4, "1280x720")
+            video_bytes = None
+            final_url = None
+            if isinstance(result, tuple):
+                video_bytes, final_url = result
+            else:
+                video_bytes = result
+
+            if not video_bytes:
+                raise ValueError("No video bytes returned from Sora")
+
+            import tempfile, os as _os
+            tf = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+            tf.write(video_bytes)
+            tf.flush()
+            tf.close()
+            filesize = _os.path.getsize(tf.name)
+
+            if filesize <= 50 * 1024 * 1024:
+                await update.message.reply_video(open(tf.name, "rb"), caption="🎥 Sora Result")
+            else:
+                await update.message.reply_document(open(tf.name, "rb"), caption="🎥 Sora Result (file)")
+
+            increment_usage(chat_id)
+            try:
+                user_name = update.message.from_user.first_name or "Unknown"
+                log_generation(chat_id, user_name, "sora", "1280x720", text, "completed", filesize=filesize, url=final_url)
+            except:
+                pass
+
+            try:
+                _os.unlink(tf.name)
+            except:
+                pass
+
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+            except:
+                pass
+            return
+        except SoraError as se:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+            except:
+                pass
+            await update.message.reply_text(f"❌ Sora error: {se}")
+            try:
+                user_name = update.message.from_user.first_name or "Unknown"
+                log_generation(chat_id, user_name, "sora", "1280x720", text, "error", url=str(se))
+            except:
+                pass
             return
         except Exception as e:
-            await update.message.reply_text(f"❌ Sora scheduling error: {e}")
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+            except:
+                pass
+            await update.message.reply_text(f"❌ Sora error: {e}")
+            try:
+                user_name = update.message.from_user.first_name or "Unknown"
+                log_generation(chat_id, user_name, "sora", "1280x720", text, "error", url=str(e))
+            except:
+                pass
             return
 
     # --- Hailuo simple flow: waiting_prompt ---
@@ -743,15 +696,73 @@ async def text_handler(update, context):
         except:
             pass
 
-        # schedule Hailuo generation in background and return immediately
+        # now generate Hailuo video (blocking call in executor)
+        status_msg = await update.message.reply_text("⏳ Generating video with Hailuo… this may take a bit.")
         try:
-            user_name = update.message.from_user.first_name or "Unknown"
-            asyncio.create_task(
-                run_generation_in_background(context, chat_id, user_name, "Hailuo", text, generate_hailuo_video, 6, size="720x1280")
-            )
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, generate_hailuo_video, text, 6, "720x1280")
+            video_bytes = None
+            final_url = None
+            if isinstance(result, tuple):
+                video_bytes, final_url = result
+            else:
+                video_bytes = result
+
+            if not video_bytes:
+                raise ValueError("No video bytes returned from Hailuo")
+
+            import tempfile, os as _os
+            tf = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+            tf.write(video_bytes)
+            tf.flush()
+            tf.close()
+            filesize = _os.path.getsize(tf.name)
+
+            if filesize <= 50 * 1024 * 1024:
+                await update.message.reply_video(open(tf.name, "rb"), caption="🎥 Hailuo Result")
+            else:
+                await update.message.reply_document(open(tf.name, "rb"), caption="🎥 Hailuo Result (file)")
+
+            increment_usage(chat_id)
+            try:
+                user_name = update.message.from_user.first_name or "Unknown"
+                log_generation(chat_id, user_name, "hailuo", "720x1280", text, "completed", filesize=filesize, url=final_url)
+            except:
+                pass
+
+            try:
+                _os.unlink(tf.name)
+            except:
+                pass
+
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+            except:
+                pass
+            return
+        except HailuoError as he:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+            except:
+                pass
+            await update.message.reply_text(f"❌ Hailuo error: {he}")
+            try:
+                user_name = update.message.from_user.first_name or "Unknown"
+                log_generation(chat_id, user_name, "hailuo", "720x1280", text, "error", url=str(he))
+            except:
+                pass
             return
         except Exception as e:
-            await update.message.reply_text(f"❌ Hailuo scheduling error: {e}")
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+            except:
+                pass
+            await update.message.reply_text(f"❌ Hailuo error: {e}")
+            try:
+                user_name = update.message.from_user.first_name or "Unknown"
+                log_generation(chat_id, user_name, "hailuo", "720x1280", text, "error", url=str(e))
+            except:
+                pass
             return
 
     # --- Nano Banana short-circuit (unchanged) ---
