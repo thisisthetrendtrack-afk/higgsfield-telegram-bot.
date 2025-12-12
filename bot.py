@@ -7,18 +7,10 @@ import string
 import random
 from datetime import datetime, timedelta
 import psycopg2
-from psycopg2.extras import RealDictCursor
-
-# Existing external handlers you've used
 from nano_banana_handler import t2i_nano_handler
-
-# New nano-banana edit API (must exist in repo)
-from nano_banana_edit_api import generate_nano_edit_image, NanoBananaEditError
-
-# Hailuo + Higgsfield
+from hailuo_handler import t2v_hailuo_handler
 from hailuo_api import generate_hailuo_video, HailuoError
-from higgsfield_api import HiggsfieldAPI
-
+from psycopg2.extras import RealDictCursor
 from telegram.ext import (
     CommandHandler,
     MessageHandler,
@@ -27,6 +19,7 @@ from telegram.ext import (
     filters,
 )
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+from higgsfield_api import HiggsfieldAPI
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -121,7 +114,6 @@ def migrate_from_json():
     except Exception as e:
         print(f"⚠️ Migration error: {e}")
 
-# session store (shared across handlers)
 user_sessions = {}
 
 def generate_redemption_key(plan_type):
@@ -235,116 +227,10 @@ def get_video_model_keyboard():
         [InlineKeyboardButton("🎨 Standard (DoP Standard)", callback_data="model_dop_standard")]
     ])
 
-# -----------------------------
-# New: Nano Banana Pro - Image Edit handlers (inlined)
-# -----------------------------
-async def t2i_nano_edit_command(update, context):
-    chat_id = update.effective_chat.id
-    # Use application.bot_data["user_sessions"] if present, else global
-    app_sessions = context.application.bot_data.get("user_sessions")
-    if app_sessions is not None:
-        app_sessions[chat_id] = {"mode": "nano_edit", "step": "waiting_photo"}
-    else:
-        user_sessions[chat_id] = {"mode": "nano_edit", "step": "waiting_photo"}
-    await update.message.reply_text(
-        "🛠 *Nano Banana Pro — Image Edit*\n\nSend the *photo* you want to edit (then you'll be asked for the prompt).",
-        parse_mode="Markdown"
-    )
-
-async def nano_edit_photo_handler(update, context):
-    chat_id = update.effective_chat.id
-    app_sessions = context.application.bot_data.get("user_sessions")
-    session = app_sessions.get(chat_id) if app_sessions is not None else user_sessions.get(chat_id)
-    # If not in nano_edit waiting_photo, ignore (let global photo handler run)
-    if not session or session.get("mode") != "nano_edit" or session.get("step") != "waiting_photo":
-        return
-
-    try:
-        photo_obj = await update.message.photo[-1].get_file()
-        b = await photo_obj.download_as_bytearray()
-        image_bytes = bytes(b)
-        if app_sessions is not None:
-            app_sessions[chat_id]["image_bytes"] = image_bytes
-            app_sessions[chat_id]["step"] = "waiting_prompt"
-        else:
-            user_sessions[chat_id]["image_bytes"] = image_bytes
-            user_sessions[chat_id]["step"] = "waiting_prompt"
-        await update.message.reply_text("✅ Photo received. Now send the *prompt* describing the edit you want.", parse_mode="Markdown")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error receiving photo: {e}")
-
-async def nano_edit_text_handler(update, context):
-    chat_id = update.effective_chat.id
-    text = update.message.text
-    app_sessions = context.application.bot_data.get("user_sessions")
-    session = app_sessions.get(chat_id) if app_sessions is not None else user_sessions.get(chat_id)
-    if not session or session.get("mode") != "nano_edit" or session.get("step") != "waiting_prompt":
-        return
-
-    image_bytes = session.get("image_bytes")
-    if not image_bytes:
-        # reset to waiting_photo
-        if app_sessions is not None:
-            app_sessions[chat_id] = {"mode": "nano_edit", "step": "waiting_photo"}
-        else:
-            user_sessions[chat_id] = {"mode": "nano_edit", "step": "waiting_photo"}
-        await update.message.reply_text("⚠️ No photo found. Please send the photo first.")
-        return
-
-    status_msg = await update.message.reply_text("⏳ Editing image with Nano Banana Pro...")
-    try:
-        loop = asyncio.get_event_loop()
-        # blocking work in executor
-        result = await loop.run_in_executor(None, generate_nano_edit_image, image_bytes, text, None, None)
-        edited_bytes = None
-        final_url = None
-        if isinstance(result, tuple):
-            edited_bytes, final_url = result
-        else:
-            edited_bytes = result
-
-        if not edited_bytes:
-            raise NanoBananaEditError("No image bytes returned from Nano Banana Edit API")
-
-        import io, os as _os, tempfile
-        bio = io.BytesIO(edited_bytes)
-        bio.name = "nano_edit.png"
-        bio.seek(0)
-
-        await update.message.reply_document(document=bio, caption="Edited with Nano Banana Pro")
-
-        # cleanup session
-        if app_sessions is not None:
-            app_sessions.pop(chat_id, None)
-        else:
-            user_sessions.pop(chat_id, None)
-
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
-        except:
-            pass
-    except NanoBananaEditError as ne:
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
-        except:
-            pass
-        await update.message.reply_text(f"❌ Nano Banana Edit error: {ne}")
-    except Exception as e:
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
-        except:
-            pass
-        await update.message.reply_text(f"❌ Unexpected error: {e}")
-
-# -----------------------------
-# End of Nano Banana Pro - Image Edit handlers
-# -----------------------------
-
 async def start(update, context):
     keyboard = [
         [InlineKeyboardButton("🖼 Text → Image (Standard)", callback_data="text2image")],
         [InlineKeyboardButton("🤖 Text → Image (Nano Banana)", callback_data="text2image_nano")],
-        [InlineKeyboardButton("🛠 Nano Banana Pro - Image Edit", callback_data="imageedit_nano")],
         [InlineKeyboardButton("🎬 Text → Video (Hailuo)", callback_data="text2video_hailuo")],
         [InlineKeyboardButton("🎥 Image → Video", callback_data="image2video")]
     ]
@@ -562,8 +448,8 @@ async def button_handler(update, context):
                 parse_mode="Markdown"
             )
         return
-    # Handle multiple menu options including new nano edit and hailuo
-    if data in ["text2image", "image2video", "text2image_nano", "text2video_hailuo", "imageedit_nano"]:
+    # Handle standard text2image, nano text2image, hailuo text2video, and image2video
+    if data in ["text2image", "image2video", "text2image_nano", "text2video_hailuo"]:
         if data == "text2image":
             user_sessions[chat_id] = {"mode": "text2image", "step": "waiting_ratio"}
             await q.edit_message_text(
@@ -572,20 +458,15 @@ async def button_handler(update, context):
                 reply_markup=get_ratio_keyboard()
             )
         elif data == "text2image_nano":
+            # mark session to use Nano Banana provider
             user_sessions[chat_id] = {"mode": "text2image", "step": "waiting_ratio", "nano_banana": True}
             await q.edit_message_text(
                 "🤖 *Nano Banana — Text to Image Mode*\n\nSelect your preferred aspect ratio:",
                 parse_mode="Markdown",
                 reply_markup=get_ratio_keyboard()
             )
-        elif data == "imageedit_nano":
-            # Start Nano Banana Pro image edit flow
-            user_sessions[chat_id] = {"mode": "nano_edit", "step": "waiting_photo"}
-            await q.edit_message_text(
-                "🛠 *Nano Banana Pro — Image Edit*\n\nSend the *photo* you want to edit (then you'll be asked for the prompt).",
-                parse_mode="Markdown"
-            )
         elif data == "text2video_hailuo":
+            # Start Hailuo simple flow: ask for prompt immediately
             user_sessions[chat_id] = {"mode": "hailuo", "step": "waiting_prompt"}
             await q.edit_message_text(
                 "🎬 *Hailuo Text → Video*\n\nSend your *text prompt* and I will generate a vertical 720x1280 video for you:",
@@ -603,7 +484,6 @@ async def photo_handler(update, context):
     chat_id = update.message.chat_id
     session = user_sessions.get(chat_id)
     if not session or session.get("mode") != "image2video":
-        # If session is nano_edit waiting_photo, that handler will take precedence because of handler registration order.
         await update.message.reply_text("⚠ Please select '🎥 Image → Video' or type /video first.")
         return
     if session.get("step") == "waiting_ratio":
@@ -637,10 +517,7 @@ async def text_handler(update, context):
     if not session:
         await update.message.reply_text("Please select a mode: /image or /video")
         return
-
-    # -----------------------
-    # Hailuo simple flow
-    # -----------------------
+    # Hailuo simple flow: waiting_prompt
     if session.get("mode") == "hailuo" and session.get("step") == "waiting_prompt":
         if not check_limit(chat_id):
             daily_limit = get_user_daily_limit(chat_id)
@@ -651,10 +528,15 @@ async def text_handler(update, context):
                 parse_mode="Markdown"
             )
             return
+        # start Hailuo generation
         status_msg = await update.message.reply_text("⏳ Generating Hailuo video (720x1280)... This can take a while.")
         try:
+            # run blocking call in executor
             loop = asyncio.get_event_loop()
+            # default size fixed to 720x1280 as requested
             video_result = await loop.run_in_executor(None, generate_hailuo_video, text, 6, "720x1280")
+            # generate_hailuo_video in our hailuo_api returns (bytes, url) in latest version —
+            # handle both tuple and raw bytes gracefully
             video_bytes = None
             final_url = None
             if isinstance(video_result, tuple):
@@ -665,6 +547,7 @@ async def text_handler(update, context):
             if not video_bytes:
                 raise ValueError("No video bytes received from Hailuo")
 
+            # write to temporary file and send (better for large files)
             import io, os as _os, tempfile
             tf = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
             try:
@@ -672,12 +555,15 @@ async def text_handler(update, context):
                 tf.flush()
                 tf.close()
                 filesize = _os.path.getsize(tf.name)
+                # If file is small enough for reply_video, use it. Otherwise send as document.
+                # Telegram may reject large video uploads; use document for bigger files.
                 try:
-                    if filesize <= 50 * 1024 * 1024:
+                    if filesize <= 50 * 1024 * 1024:  # 50 MB threshold (adjust if your bot supports more)
                         await update.message.reply_video(open(tf.name, "rb"), caption="🎬 Generated by Hailuo")
                     else:
                         await update.message.reply_document(open(tf.name, "rb"), caption="🎬 Generated by Hailuo (document)")
                 except Exception as send_err:
+                    # If sending fails, at least provide the final URL if present
                     try:
                         if final_url:
                             await update.message.reply_text(f"✅ Video ready but sending failed. Download here: {final_url}")
@@ -685,6 +571,7 @@ async def text_handler(update, context):
                             await update.message.reply_text(f"✅ Video ready but sending failed. Error: {send_err}")
                     except:
                         pass
+                # increment usage after successful generation attempt
                 increment_usage(chat_id)
             finally:
                 try:
@@ -712,11 +599,7 @@ async def text_handler(update, context):
             await update.message.reply_text(f"❌ Unexpected Hailuo error: {e}")
             return
 
-    # -----------------------
-    # Nano Banana Pro Edit simple flow handled earlier: uses its own handlers (photo + text)
-    # If we get here and session == nano_edit, ignore because specific handlers are registered earlier.
-    # -----------------------
-
+    # fallback: keep all previous logic unchanged for other modes
     if session.get("step") == "waiting_ratio":
         await update.message.reply_text(
             "⚠️ Please select an aspect ratio first:",
@@ -747,21 +630,33 @@ async def text_handler(update, context):
     status_msg = await update.message.reply_text("⏳ Initializing...")
     aspect_ratio = session.get("aspect_ratio", "1:1")
 
-    # Nano Banana (text2image) branch retained, unchanged
+    # --- Nano Banana branch: send image without caption, then send log text separately ---
     if session["mode"] == "text2image" and session.get("nano_banana"):
         try:
+            # notify user generation started
             await update.message.reply_text("⏳ Generating image with Nano Banana…")
+
             loop = asyncio.get_event_loop()
+            # blocking call executed in thread pool
             from nano_banana_api import generate_nano_image, NanoBananaError
+
             size_map = {"9:16": "1024x2048", "16:9": "2048x1024", "1:1": "1024x1024"}
             size = size_map.get(aspect_ratio, "1024x1024")
+
             image_bytes = await loop.run_in_executor(None, generate_nano_image, text, size)
+
             import io
             bio = io.BytesIO(image_bytes)
             bio.name = "nano.png"
             bio.seek(0)
+
+            # increment usage (keeps your quota logic intact)
             increment_usage(chat_id)
+
+            # 1) send image alone (no caption) to preserve quality
             await update.message.reply_document(document=bio)
+
+            # 2) send a separate log message (no image attached)
             user_mention = update.message.from_user.first_name or "Unknown"
             ratio_label = {"9:16": "📱 9:16", "16:9": "💻 16:9", "1:1": "⬜ 1:1"}.get(aspect_ratio, aspect_ratio)
             log_text = (
@@ -769,13 +664,16 @@ async def text_handler(update, context):
                 f"👤 {user_mention} (`{chat_id}`)\n"
                 f"🎯 text2image\n"
                 f"📐 Ratio: {ratio_label}\n\n"
-                f"📝 {text[:800]}"
+                f"📝 {text[:800]}"  # trim prompt to safe length
             )
             await update.message.reply_text(log_text, parse_mode="Markdown")
+
+            # remove the progress message if present
             try:
                 await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
             except:
                 pass
+
             return
         except Exception as e:
             try:
@@ -785,7 +683,9 @@ async def text_handler(update, context):
             await update.message.reply_text(f"❌ Nano Banana error: {e}")
             return
 
-    # Existing HuggingFace / Higgsfield flow unchanged
+    # --- Hailuo Text->Video (already handled above) ---
+
+    # --- Existing HuggingFace / Higgsfield flow (unchanged) ---
     if session["mode"] == "text2image":
         model_id = "higgsfield-ai/soul/standard"
         payload = {"prompt": text, "aspect_ratio": aspect_ratio}
@@ -1025,17 +925,12 @@ async def admin_broadcast(update, context):
         await update.message.reply_text(f"❌ Error: {e}")
 
 def register_handlers(app):
-    # expose shared sessions to handlers that expect it
-    app.bot_data["user_sessions"] = user_sessions
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("image", command_image))
     # nano direct command (keeps existing flows intact)
     app.add_handler(CommandHandler("nano", t2i_nano_handler))
-    # nano edit command (new)
-    app.add_handler(CommandHandler("nano_edit", t2i_nano_edit_command))
     # hailuo direct command
-    app.add_handler(CommandHandler("hailuo", lambda u,c: asyncio.create_task(start(u,c)) if False else None))  # keep signature; your main registers hailuo command elsewhere if needed
+    app.add_handler(CommandHandler("hailuo", t2v_hailuo_handler))
     app.add_handler(CommandHandler("video", command_video))
     app.add_handler(CommandHandler("plans", command_plans))
     app.add_handler(CommandHandler("redeem", command_redeem))
@@ -1046,11 +941,6 @@ def register_handlers(app):
     app.add_handler(CommandHandler("members", admin_members))
     app.add_handler(CommandHandler("broadcast", admin_broadcast))
     app.add_handler(CommandHandler("dbstatus", admin_dbstatus))
-
-    # Register our specialized handlers for nano-edit BEFORE the general PHOTO/TEXT handlers
-    app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, nano_edit_photo_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, nano_edit_text_handler))
-
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
