@@ -289,7 +289,15 @@ def register_handlers(app):
     app.add_handler(CommandHandler("video", command_video))
     app.add_handler(CommandHandler("nano", t2i_nano_handler))
     app.add_handler(CommandHandler("hailuo", t2v_hailuo_handler))
+    app.add_handler(CommandHandler("plans", command_plans))
+    app.add_handler(CommandHandler("redeem", command_redeem))
+    app.add_handler(CommandHandler("help", command_help))
+    app.add_handler(CommandHandler("quota", command_quota))
+    app.add_handler(CommandHandler("myplan", command_myplan))
+    app.add_handler(CommandHandler("genkey", admin_genkey))
+    app.add_handler(CommandHandler("members", admin_members))
+    app.add_handler(CommandHandler("broadcast", admin_broadcast))
+    app.add_handler(CommandHandler("dbstatus", admin_dbstatus))
     app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-
-# EOF
