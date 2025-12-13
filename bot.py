@@ -152,6 +152,7 @@ def check_limit(chat_id):
         return True
     try:
         today_date = datetime.now().date()
+        today_date = datetime.now().date()
         today_str = today_date.strftime("%Y-%m-%d")
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
@@ -240,8 +241,7 @@ async def start(update, context):
         [InlineKeyboardButton("🤖 Text → Image (Nano Banana)", callback_data="text2image_nano")],
         [InlineKeyboardButton("🎬 Text → Video (Hailuo)", callback_data="text2video_hailuo")],
         [InlineKeyboardButton("🎥 Text → Video (Sora)", callback_data="text2video_sora")],
-        [InlineKeyboardButton("🎥 Image → Video", callback_data="image2video")],
-        [InlineKeyboardButton("🍌 Image Edit (Nano Banana)", callback_data="nano_edit")]
+        [InlineKeyboardButton("🎥 Image → Video", callback_data="image2video")]
     ]
     daily_limit = get_user_daily_limit(update.message.chat_id)
     limit_text = f"{daily_limit}/day" if daily_limit else "Unlimited"
@@ -299,16 +299,11 @@ async def command_redeem(update, context):
             conn.close()
             return
         if key_data.get("used"):
-            await update.message.reply_text("❌ Redemption key already used!")
+            await update.message.reply_text("❌ This key has already been used!")
             cur.close()
             conn.close()
             return
-        plan_type = key_data.get("plan")
-        if plan_type not in PLANS:
-            await update.message.reply_text("❌ Invalid plan type associated with key!")
-            cur.close()
-            conn.close()
-            return
+        plan_type = key_data["plan"]
         plan = PLANS[plan_type]
         expiry_date = datetime.now() + timedelta(days=plan["duration_days"])
         cur.execute(
@@ -324,55 +319,77 @@ async def command_redeem(update, context):
         conn.commit()
         cur.close()
         conn.close()
+        user_name = update.message.from_user.first_name or "Unknown"
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"🔑 *Key Redeemed!*\n\n"
+                     f"👤 User: {user_name} (`{chat_id}`)\n"
+                     f"💳 Plan: {plan['name']}\n"
+                     f"🔑 Key: `{key}`\n"
+                     f"📅 Expires: {expiry_date.strftime('%Y-%m-%d %H:%M UTC')}",
+                parse_mode="Markdown"
+            )
+        except:
+            pass
         await update.message.reply_text(
-            f"✅ Plan Activated!\n\n"
-            f"You now have the *{plan['name']}* plan.\n"
-            f"Daily limit: {plan.get('daily_limit', 'Unlimited')}\n"
-            f"Expires: {expiry_date.strftime('%Y-%m-%d %H:%M UTC')}",
+            f"✅ *Plan Activated!*\n\n"
+            f"Plan: {plan['name']}\n"
+            f"Limit: {plan['daily_limit']}/day\n"
+            f"Expires: {expiry_date.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+            f"Start using: /image or /video",
             parse_mode="Markdown"
         )
     except Exception as e:
-        await update.message.reply_text(f"❌ Error redeeming key: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
 
 async def admin_genkey(update, context):
     if update.message.chat_id != ADMIN_ID:
         await update.message.reply_text("❌ Admin only!")
         return
-    if len(context.args) < 2:
-        await update.message.reply_text("Usage: `/genkey PLAN COUNT` (e.g., `/genkey weekly 5`)")
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: `/genkey PLAN COUNT`\n\n"
+            "Plans: starter, weekly, monthly, lifetime\n"
+            "Example: `/genkey starter 5`",
+            parse_mode="Markdown"
+        )
         return
-    plan_type = context.args[0].lower()
+    plan = context.args[0].lower()
     try:
         count = int(context.args[1])
-    except ValueError:
-        await update.message.reply_text("❌ COUNT must be a number.")
+    except:
+        await update.message.reply_text("❌ Count must be a number")
         return
-    if plan_type not in PLANS:
-        await update.message.reply_text(f"❌ Invalid plan type. Available: {', '.join(PLANS.keys())}")
+    if plan not in PLANS:
+        await update.message.reply_text(f"❌ Invalid plan. Use: {', '.join(PLANS.keys())}")
         return
-    
-    keys = []
     try:
         conn = get_db_connection()
         cur = conn.cursor()
+        generated = []
         for _ in range(count):
-            key = generate_redemption_key(plan_type)
+            key = generate_redemption_key(plan)
+            while True:
+                cur.execute("SELECT key FROM redemption_keys WHERE key = %s", (key,))
+                if not cur.fetchone():
+                    break
+                key = generate_redemption_key(plan)
             cur.execute(
-                "INSERT INTO redemption_keys (key, plan) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING",
-                (key, plan_type)
+                "INSERT INTO redemption_keys (key, plan) VALUES (%s, %s)",
+                (key, plan)
             )
-            keys.append(key)
+            generated.append(key)
         conn.commit()
         cur.close()
         conn.close()
-        
-        keys_text = "\n".join(keys)
+        keys_list = "\n".join(generated)
         await update.message.reply_text(
-            f"✅ Generated {len(keys)} keys for *{PLANS[plan_type]['name']}*:\n\n`{keys_text}`",
+            f"✅ Generated {count} {plan.upper()} keys:\n\n`{keys_list}`",
             parse_mode="Markdown"
         )
     except Exception as e:
-        await update.message.reply_text(f"❌ Error generating keys: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
 
 async def command_image(update, context):
     chat_id = update.message.chat_id
@@ -383,116 +400,105 @@ async def command_image(update, context):
         reply_markup=get_ratio_keyboard()
     )
 
-async def command_nano_edit(update, context):
-    chat_id = update.message.chat_id
-    user_sessions[chat_id] = {"mode": "nano_edit", "step": "waiting_photo"}
-    await update.message.reply_text(
-        "🍌 *Nano Banana Edit Mode (Image-to-Image)*\n\n"
-        "1. Send *Photo 1*.\n"
-        "2. Send *Photo 2*.\n"
-        "3. Send a *text prompt* to combine and edit them.\n\n"
-        "You can also choose an aspect ratio:",
-        parse_mode="Markdown",
-        reply_markup=get_ratio_keyboard()
-    )
-
 async def command_video(update, context):
     chat_id = update.message.chat_id
     user_sessions[chat_id] = {"mode": "image2video", "step": "waiting_model"}
     await update.message.reply_text(
-        "🎬 *Image to Video Mode*\n\n*Choose your video quality:*\n\n⚡ Fast - Quick generation\n🎨 Standard - Higher quality",
+        "🎥 *Image to Video Mode*\n\n*Choose your video quality:*\n\n⚡ Fast - Quick generation\n🎨 Standard - Higher quality",
         parse_mode="Markdown",
         reply_markup=get_video_model_keyboard()
     )
 
 async def button_handler(update, context):
-    query = update.callback_query
-    await query.answer()
-    chat_id = query.message.chat_id
-    data = query.data
-    session = user_sessions.get(chat_id, {})
-
-    if data == "text2image":
-        session = {"mode": "text2image", "step": "waiting_ratio"}
-        user_sessions[chat_id] = session
-        await query.edit_message_text(
-            "🖼 *Text to Image Mode*\n\nSelect your preferred aspect ratio:",
+    q = update.callback_query
+    await q.answer()
+    data = q.data
+    chat_id = q.message.chat_id
+    if data.startswith("model_"):
+        session = user_sessions.get(chat_id)
+        if not session:
+            await q.edit_message_text("⚠️ Session expired. Please use /start to begin again.")
+            return
+        model_key = data.replace("model_", "")
+        model_map = {
+            "dop_turbo": "higgsfield-ai/dop/turbo",
+            "dop_standard": "higgsfield-ai/dop/standard"
+        }
+        session["video_model"] = model_map.get(model_key, "higgsfield-ai/dop/turbo")
+        session["step"] = "waiting_ratio"
+        model_label = {"dop_turbo": "⚡ Fast", "dop_standard": "🎨 Standard"}.get(model_key, model_key)
+        await q.edit_message_text(
+            f"✅ Model: *{model_label}*\n\nNow select your aspect ratio:",
             parse_mode="Markdown",
             reply_markup=get_ratio_keyboard()
         )
-    elif data == "text2image_nano":
-        session = {"mode": "text2image", "step": "waiting_ratio", "nano_banana": True}
-        user_sessions[chat_id] = session
-        await query.edit_message_text(
-            "🍌 *Nano Banana Image Generation Mode*\n\nSelect your preferred aspect ratio:",
-            parse_mode="Markdown",
-            reply_markup=get_ratio_keyboard()
-        )
-    elif data == "text2video_hailuo":
-        session = {"mode": "hailuo", "step": "waiting_prompt"}
-        user_sessions[chat_id] = session
-        await query.edit_message_text(
-            "🎬 *Hailuo Text to Video Mode*\n\n"
-            "Send a text prompt to generate a video.",
-            parse_mode="Markdown"
-        )
-    elif data == "text2video_sora":
-        session = {"mode": "sora", "step": "waiting_prompt"}
-        user_sessions[chat_id] = session
-        await query.edit_message_text(
-            "🎥 *Sora Text to Video Mode*\n\n"
-            "Send a text prompt to generate a video.",
-            parse_mode="Markdown"
-        )
-    elif data == "nano_edit":
-        session = {"mode": "nano_edit", "step": "waiting_photo"}
-        user_sessions[chat_id] = session
-        await query.edit_message_text(
-            "🍌 *Nano Banana Edit Mode (Image-to-Image)*\n\n"
-            "1. Send *Photo 1*.\n"
-            "2. Send *Photo 2*.\n"
-            "3. Send a *text prompt* to combine and edit them.\n\n"
-            "You can also choose an aspect ratio:",
-            parse_mode="Markdown",
-            reply_markup=get_ratio_keyboard()
-        )
-    elif data == "image2video":
-        user_sessions[chat_id] = {"mode": "image2video", "step": "waiting_model"}
-        await query.edit_message_text(
-            "🎥 *Image to Video Mode*\n\n*Choose your video quality:*\n\n⚡ Fast - Quick generation\n🎨 Standard - Higher quality",
-            parse_mode="Markdown",
-            reply_markup=get_video_model_keyboard()
-        )
-    elif data.startswith("ratio_"):
-        ratio = data.split("_")[1]
+        return
+    if data.startswith("ratio_"):
+        session = user_sessions.get(chat_id)
+        if not session:
+            await q.edit_message_text("⚠️ Session expired. Please use /start to begin again.")
+            return
+        ratio = data.replace("ratio_", "")
         session["aspect_ratio"] = ratio
+        session["step"] = "waiting_input"
         ratio_label = {"9:16": "📱 9:16", "16:9": "💻 16:9", "1:1": "⬜ 1:1"}.get(ratio, ratio)
-        await query.edit_message_text(
-            f"{query.message.text}\n\n✅ Aspect Ratio set to: *{ratio_label}*",
-            parse_mode="Markdown",
-            reply_markup=query.message.reply_markup
-        )
-    elif data.startswith("model_"):
-        model = data.split("_")[1]
-        session["video_model"] = f"higgsfield-ai/dop/{model}"
-        model_label = {"dop_turbo": "⚡ Fast (DoP Turbo)", "dop_standard": "🎨 Standard (DoP Standard)"}.get(model, model)
-        await query.edit_message_text(
-            f"{query.message.text}\n\n✅ Video Model set to: *{model_label}*",
-            parse_mode="Markdown",
-            reply_markup=query.message.reply_markup
-        )
+        if session["mode"] == "text2image":
+            await q.edit_message_text(
+                f"✅ Aspect Ratio: *{ratio_label}*\n\n📝 Now send your *text prompt* to generate an image:",
+                parse_mode="Markdown"
+            )
+        elif session["mode"] == "image2video":
+            await q.edit_message_text(
+                f"✅ Aspect Ratio: *{ratio_label}*\n\n📷 Now send me the *photo* you want to animate:",
+                parse_mode="Markdown"
+            )
+        elif session["mode"] == "text2video":
+            await q.edit_message_text(
+                f"✅ Aspect Ratio: *{ratio_label}*\n\n📝 Now send your *text prompt* to generate a video:",
+                parse_mode="Markdown"
+            )
+        return
+    # Handle standard text2image, nano text2image, hailuo text2video, sora text2video, and image2video
+    if data in ["text2image", "image2video", "text2image_nano", "text2video_hailuo", "text2video_sora"]:
+        if data == "text2image":
+            user_sessions[chat_id] = {"mode": "text2image", "step": "waiting_ratio"}
+            await q.edit_message_text(
+                "🖼 *Text to Image Mode*\n\nSelect your preferred aspect ratio:",
+                parse_mode="Markdown",
+                reply_markup=get_ratio_keyboard()
+            )
+        elif data == "text2image_nano":
+            # mark session to use Nano Banana provider
+            user_sessions[chat_id] = {"mode": "text2image", "step": "waiting_ratio", "nano_banana": True}
+            await q.edit_message_text(
+                "🤖 *Nano Banana — Text to Image Mode*\n\nSelect your preferred aspect ratio:",
+                parse_mode="Markdown",
+                reply_markup=get_ratio_keyboard()
+            )
+        elif data == "text2video_hailuo":
+            # Start Hailuo simple flow: ask for prompt immediately
+            user_sessions[chat_id] = {"mode": "hailuo", "step": "waiting_prompt"}
+            await q.edit_message_text(
+                "🎬 *Hailuo Text → Video*\n\nSend your *text prompt* and I will generate a vertical 720x1280 video for you:",
+                parse_mode="Markdown"
+            )
+        elif data == "text2video_sora":
+            # Start Sora simple flow: ask for prompt immediately
+            user_sessions[chat_id] = {"mode": "sora", "step": "waiting_prompt"}
+            await q.edit_message_text(
+                "🎬 *Sora Text → Video*\n\nSend your *text prompt* and I will generate a video for you (default 1280x720):",
+                parse_mode="Markdown"
+            )
+        elif data == "image2video":
+            user_sessions[chat_id] = {"mode": "image2video", "step": "waiting_model"}
+            await q.edit_message_text(
+                "🎥 *Image to Video Mode*\n\n*Choose your video quality:*\n\n⚡ Fast - Quick generation\n🎨 Standard - Higher quality",
+                parse_mode="Markdown",
+                reply_markup=get_video_model_keyboard()
+            )
 
 async def photo_handler(update, context):
     chat_id = update.message.chat_id
-    if not check_limit(chat_id):
-        daily_limit = get_user_daily_limit(chat_id)
-        await update.message.reply_text(
-            f"❌ Daily Limit Reached\n"
-            f"You've used all {daily_limit} generations today.\n\n"
-            f"Use `/redeem KEY` to get more generations",
-            parse_mode="Markdown"
-        )
-        return
     session = user_sessions.get(chat_id)
     if not session or session.get("mode") != "image2video":
         await update.message.reply_text("⚠ Please select '🎥 Image → Video' or type /video first.")
@@ -528,68 +534,6 @@ async def text_handler(update, context):
     if not session:
         await update.message.reply_text("Please select a mode: /image or /video")
         return
-
-    # --- Nano Banana Edit flow: waiting_prompt ---
-    if session.get("mode") == "nano_edit" and session.get("step") == "waiting_prompt":
-        if not check_limit(chat_id):
-            daily_limit = get_user_daily_limit(chat_id)
-            await update.message.reply_text(
-                f"❌ Daily Limit Reached\n"
-                f"You've used all {daily_limit} generations today.\n\n"
-                f"Use `/redeem KEY` to get more generations",
-                parse_mode="Markdown"
-            )
-            return
-        status_msg = await update.message.reply_text("⏳ Generating Nano Banana Edit image...")
-        try:
-            loop = asyncio.get_event_loop()
-            from nano_banana_edit_api import generate_nano_edit_image, NanoBananaEditError
-
-            image_urls = session.get("init_image_urls", [])
-            
-            # The API call is synchronous and blocking, so we run it in a separate thread
-            image_bytes, final_url = await loop.run_in_executor(
-                None, 
-                generate_nano_edit_image, 
-                image_urls, 
-                text, 
-                session.get("aspect_ratio")
-            )
-
-            if not image_bytes:
-                raise ValueError("No image bytes received from Nano Banana Edit")
-
-            import io
-            bio = io.BytesIO(image_bytes)
-            bio.name = "nano_edit.png"
-            bio.seek(0)
-
-            increment_usage(chat_id)
-
-            await update.message.reply_document(document=bio, caption=f"✨ Here is your edited image!\n\n🔔 Subscribe: @HiggsMasterBotChannel")
-
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
-            except:
-                pass
-            
-            # Clear session
-            user_sessions[chat_id] = {}
-            return
-        except NanoBananaEditError as ne:
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
-            except:
-                pass
-            await update.message.reply_text(f"❌ Nano Banana Edit error: {ne}")
-            return
-        except Exception as e:
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
-            except:
-                pass
-            await update.message.reply_text(f"❌ Unexpected Nano Banana Edit error: {e}")
-            return
 
     # --- Sora simple flow: waiting_prompt ---
     if session.get("mode") == "sora" and session.get("step") == "waiting_prompt":
@@ -881,7 +825,7 @@ async def command_quota(update, context):
         user_data = cur.fetchone()
         cur.close()
         conn.close()
-        if not user_data or user_data.get("date") != today_date:
+        if not user_data or user_data.get("date") != today:
             used = 0
         else:
             used = user_data.get("count", 0)
@@ -1060,7 +1004,6 @@ def register_handlers(app):
     # hailuo direct command (if you have hailuo_handler)
     app.add_handler(CommandHandler("hailuo", t2v_hailuo_handler))
     app.add_handler(CommandHandler("video", command_video))
-    app.add_handler(CommandHandler("nanoedit", command_nano_edit))
     app.add_handler(CommandHandler("plans", command_plans))
     app.add_handler(CommandHandler("redeem", command_redeem))
     app.add_handler(CommandHandler("help", command_help))
@@ -1071,8 +1014,6 @@ def register_handlers(app):
     app.add_handler(CommandHandler("broadcast", admin_broadcast))
     app.add_handler(CommandHandler("dbstatus", admin_dbstatus))
     app.add_handler(CallbackQueryHandler(button_handler))
-    from nano_banana_edit_handler import nano_edit_photo_handler
-    app.add_handler(MessageHandler(filters.PHOTO, nano_edit_photo_handler))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
