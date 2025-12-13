@@ -3,8 +3,8 @@ import os
 import json
 import asyncio
 import logging
-import string
 import random
+import string
 from datetime import datetime, timedelta
 
 import psycopg2
@@ -23,7 +23,7 @@ from nano_banana_api import generate_nano_image
 from hailuo_api import generate_hailuo_video
 from sora_api import generate_sora_video
 
-# ---------------- CONFIG ---------------- #
+# ================= CONFIG ================= #
 
 logging.basicConfig(level=logging.INFO)
 
@@ -32,15 +32,15 @@ MAX_FREE_DAILY = 2
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 PLANS = {
-    "starter": {"duration_days": 1, "daily_limit": 10, "name": "Starter (1 day)"},
-    "weekly": {"duration_days": 7, "daily_limit": 50, "name": "Weekly (7 days)"},
-    "monthly": {"duration_days": 30, "daily_limit": 150, "name": "Monthly (30 days)"},
-    "lifetime": {"duration_days": 999999, "daily_limit": None, "name": "Lifetime"},
+    "starter": {"duration_days": 1, "daily_limit": 10},
+    "weekly": {"duration_days": 7, "daily_limit": 50},
+    "monthly": {"duration_days": 30, "daily_limit": 150},
+    "lifetime": {"duration_days": 999999, "daily_limit": None},
 }
 
 user_sessions = {}
 
-# ---------------- DATABASE ---------------- #
+# ================= DATABASE ================= #
 
 def db():
     return psycopg2.connect(DATABASE_URL)
@@ -55,7 +55,8 @@ def init_db():
             date DATE DEFAULT CURRENT_DATE,
             plan_type TEXT,
             plan_expiry TIMESTAMP
-        )""")
+        )
+        """)
         conn.commit()
 
 def get_daily_limit(chat_id):
@@ -81,11 +82,17 @@ def check_limit(chat_id):
         cur.execute("SELECT * FROM users WHERE chat_id=%s", (chat_id,))
         u = cur.fetchone()
         if not u:
-            cur.execute("INSERT INTO users (chat_id,count,date) VALUES (%s,0,%s)", (chat_id, today))
+            cur.execute(
+                "INSERT INTO users (chat_id,count,date) VALUES (%s,0,%s)",
+                (chat_id, today)
+            )
             conn.commit()
             return True
         if u["date"] != today:
-            cur.execute("UPDATE users SET count=0,date=%s WHERE chat_id=%s", (today, chat_id))
+            cur.execute(
+                "UPDATE users SET count=0,date=%s WHERE chat_id=%s",
+                (today, chat_id)
+            )
             conn.commit()
             return True
         limit = get_daily_limit(chat_id)
@@ -93,15 +100,18 @@ def check_limit(chat_id):
             return False
     return True
 
-def increment(chat_id):
+def increment_usage(chat_id):
     if chat_id == ADMIN_ID:
         return
     with db() as conn:
         cur = conn.cursor()
-        cur.execute("UPDATE users SET count=count+1 WHERE chat_id=%s", (chat_id,))
+        cur.execute(
+            "UPDATE users SET count=count+1 WHERE chat_id=%s",
+            (chat_id,)
+        )
         conn.commit()
 
-# ---------------- UI ---------------- #
+# ================= UI ================= #
 
 def ratio_keyboard():
     return InlineKeyboardMarkup([
@@ -110,108 +120,115 @@ def ratio_keyboard():
         [InlineKeyboardButton("⬜ 1:1", callback_data="ratio_1:1")]
     ])
 
-# ---------------- START ---------------- #
+# ================= START ================= #
 
 async def start(update, context):
-    kb = [
+    keyboard = [
         [InlineKeyboardButton("🖼 Text → Image", callback_data="text2image")],
-        [InlineKeyboardButton("🤖 Nano Banana Image", callback_data="text2image_nano")],
-        [InlineKeyboardButton("🎬 Text → Video (Hailuo)", callback_data="t2v_hailuo")],
-        [InlineKeyboardButton("🎥 Text → Video (Sora)", callback_data="t2v_sora")],
-        [InlineKeyboardButton("🎞 Image → Video", callback_data="image2video")]
+        [InlineKeyboardButton("🤖 Nano Banana Image", callback_data="nano")],
+        [InlineKeyboardButton("🎬 Text → Video (Hailuo)", callback_data="hailuo")],
+        [InlineKeyboardButton("🎥 Text → Video (Sora)", callback_data="sora")],
+        [InlineKeyboardButton("🎞 Image → Video", callback_data="image2video")],
     ]
     limit = get_daily_limit(update.message.chat_id)
     await update.message.reply_text(
-        f"🤖 *Higgsfield AI Bot*\n\n📌 Limit: {limit if limit else 'Unlimited'}",
+        f"🤖 *Higgsfield AI Bot*\n\n📌 Daily limit: {limit if limit else 'Unlimited'}",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(kb)
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-# ---------------- BUTTONS ---------------- #
+# ================= BUTTON HANDLER ================= #
 
-async def buttons(update, context):
+async def button_handler(update, context):
     q = update.callback_query
     await q.answer()
-    cid = q.message.chat_id
-    d = q.data
+    chat_id = q.message.chat_id
+    data = q.data
 
-    # RESET SESSION ALWAYS (fixes bugs)
-    user_sessions[cid] = {}
+    # IMPORTANT: reset session every time (bug fix)
+    user_sessions[chat_id] = {}
 
-    if d == "text2image":
-        user_sessions[cid] = {"mode": "text2image", "step": "ratio"}
-        await q.edit_message_text("Select ratio:", reply_markup=ratio_keyboard())
+    if data == "text2image":
+        user_sessions[chat_id] = {"mode": "text2image", "step": "ratio"}
+        await q.edit_message_text("Select aspect ratio:", reply_markup=ratio_keyboard())
 
-    elif d == "text2image_nano":
-        user_sessions[cid] = {"mode": "nano", "step": "ratio"}
-        await q.edit_message_text("Nano Banana → Select ratio:", reply_markup=ratio_keyboard())
+    elif data == "nano":
+        user_sessions[chat_id] = {"mode": "nano", "step": "ratio"}
+        await q.edit_message_text("Nano Banana → Select aspect ratio:", reply_markup=ratio_keyboard())
 
-    elif d == "t2v_hailuo":
-        user_sessions[cid] = {"mode": "hailuo", "step": "prompt"}
-        await q.edit_message_text("Send your prompt for Hailuo video:")
+    elif data == "hailuo":
+        user_sessions[chat_id] = {"mode": "hailuo", "step": "prompt"}
+        await q.edit_message_text("Send your text prompt for Hailuo video:")
 
-    elif d == "t2v_sora":
-        user_sessions[cid] = {"mode": "sora", "step": "prompt"}
-        await q.edit_message_text("Send your prompt for Sora video:")
+    elif data == "sora":
+        user_sessions[chat_id] = {"mode": "sora", "step": "prompt"}
+        await q.edit_message_text("Send your text prompt for Sora video:")
 
-    elif d.startswith("ratio_"):
-        ratio = d.split("_")[1]
-        user_sessions[cid]["ratio"] = ratio
-        user_sessions[cid]["step"] = "prompt"
+    elif data.startswith("ratio_"):
+        ratio = data.split("_")[1]
+        user_sessions[chat_id]["ratio"] = ratio
+        user_sessions[chat_id]["step"] = "prompt"
         await q.edit_message_text("Send your prompt:")
 
-# ---------------- TEXT ---------------- #
+# ================= TEXT HANDLER ================= #
 
 async def text_handler(update, context):
-    cid = update.message.chat_id
+    chat_id = update.message.chat_id
     text = update.message.text
-    s = user_sessions.get(cid)
+    session = user_sessions.get(chat_id)
 
-    if not s:
+    if not session:
         await update.message.reply_text("Use /start")
         return
 
-    if not check_limit(cid):
+    if not check_limit(chat_id):
         await update.message.reply_text("❌ Daily limit reached")
         return
 
-    # ---- NANO ----
-    if s["mode"] == "nano":
-        size = {"9:16":"1024x2048","16:9":"2048x1024","1:1":"1024x1024"}[s["ratio"]]
-        img = await asyncio.get_event_loop().run_in_executor(None, generate_nano_image, text, size)
+    loop = asyncio.get_event_loop()
+
+    # ---------- NANO ----------
+    if session["mode"] == "nano":
+        size_map = {
+            "9:16": "1024x2048",
+            "16:9": "2048x1024",
+            "1:1": "1024x1024",
+        }
+        size = size_map[session["ratio"]]
+        img = await loop.run_in_executor(None, generate_nano_image, text, size)
         await update.message.reply_document(img)
-        increment(cid)
+        increment_usage(chat_id)
         return
 
-    # ---- HAILUO ----
-    if s["mode"] == "hailuo":
-        vid = await asyncio.get_event_loop().run_in_executor(None, generate_hailuo_video, text, 6, "720x1280")
+    # ---------- HAILUO ----------
+    if session["mode"] == "hailuo":
+        vid = await loop.run_in_executor(None, generate_hailuo_video, text, 6, "720x1280")
         await update.message.reply_video(vid)
-        increment(cid)
+        increment_usage(chat_id)
         return
 
-    # ---- SORA ----
-    if s["mode"] == "sora":
-        vid = await asyncio.get_event_loop().run_in_executor(None, generate_sora_video, text, 4, "1280x720")
+    # ---------- SORA ----------
+    if session["mode"] == "sora":
+        vid = await loop.run_in_executor(None, generate_sora_video, text, 4, "1280x720")
         await update.message.reply_video(vid)
-        increment(cid)
+        increment_usage(chat_id)
         return
 
-    # ---- STANDARD IMAGE ----
+    # ---------- STANDARD IMAGE ----------
     hf = HiggsfieldAPI(os.getenv("HF_KEY"), os.getenv("HF_SECRET"))
-    r = hf.submit("higgsfield-ai/soul/standard", {
-        "prompt": text,
-        "aspect_ratio": s["ratio"]
-    })
-    final = await hf.wait_for_result(r["request_id"])
+    resp = hf.submit(
+        "higgsfield-ai/soul/standard",
+        {"prompt": text, "aspect_ratio": session["ratio"]}
+    )
+    final = await hf.wait_for_result(resp["request_id"])
     await update.message.reply_photo(final["images"][0]["url"])
-    increment(cid)
+    increment_usage(chat_id)
 
-# ---------------- REGISTER ---------------- #
+# ================= REGISTER ================= #
 
 def register_handlers(app):
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(buttons))
+    app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
 # EOF
