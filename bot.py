@@ -7,7 +7,16 @@ import string
 import random
 from datetime import datetime, timedelta
 import psycopg2
+from nano_banana_handler import t2i_nano_handler
 from psycopg2.extras import RealDictCursor
+
+# Sora integration
+from sora_api import generate_sora_video, SoraError
+
+# Hailuo integration (kept)
+from hailuo_api import generate_hailuo_video, HailuoError
+from hailuo_handler import t2v_hailuo_handler
+
 from telegram.ext import (
     CommandHandler,
     MessageHandler,
@@ -16,21 +25,13 @@ from telegram.ext import (
     filters,
 )
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-
-# Integrations
-from nano_banana_handler import t2i_nano_handler
-from sora_api import generate_sora_video, SoraError
-from hailuo_api import generate_hailuo_video, HailuoError
-from hailuo_handler import t2v_hailuo_handler
 from higgsfield_api import HiggsfieldAPI
 
-# --- Logging Setup ---
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 
-# --- Configuration ---
 ADMIN_ID = 7872634386
 MAX_FREE_DAILY = 2
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -42,15 +43,10 @@ PLANS = {
     "lifetime": {"price": 50, "duration_days": 999999, "daily_limit": None, "name": "Lifetime"}
 }
 
-user_sessions = {}
-
-# --- Database Functions (Fixed Connection Handling) ---
-
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
 def init_db():
-    conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -74,23 +70,72 @@ def init_db():
             )
         """)
         conn.commit()
+        cur.close()
+        conn.close()
         print("✅ Database initialized")
     except Exception as e:
         print(f"⚠️ DB init error: {e}")
-    finally:
-        if conn:
-            conn.close()
+
+def migrate_from_json():
+    if not os.path.exists("data.json"):
+        return
+    try:
+        with open("data.json", "r") as f:
+            data = json.load(f)
+        conn = get_db_connection()
+        cur = conn.cursor()
+        for chat_id, user_data in data.get("users", {}).items():
+            cur.execute("""
+                INSERT INTO users (chat_id, count, date, plan_type, plan_expiry)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (chat_id) DO UPDATE SET
+                    count = EXCLUDED.count,
+                    date = EXCLUDED.date,
+                    plan_type = EXCLUDED.plan_type,
+                    plan_expiry = EXCLUDED.plan_expiry
+            """, (
+                int(chat_id),
+                user_data.get("count", 0),
+                user_data.get("date", datetime.now().strftime("%Y-%m-%d")),
+                user_data.get("plan_type"),
+                user_data.get("plan_expiry")
+            ))
+        for key, key_data in data.get("keys", {}).items():
+            cur.execute("""
+                INSERT INTO redemption_keys (key, plan, used, created_date, used_by, used_date)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (key) DO NOTHING
+            """, (
+                key,
+                key_data.get("plan"),
+                key_data.get("used", False),
+                key_data.get("created_date"),
+                key_data.get("used_by"),
+                key_data.get("used_date")
+            ))
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("✅ Migration complete!")
+    except Exception as e:
+        print(f"⚠️ Migration error: {e}")
+
+user_sessions = {}
+
+def generate_redemption_key(plan_type):
+    key = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+    return key
 
 def get_user_daily_limit(chat_id):
     if chat_id == ADMIN_ID:
-        return None # Infinite
-    conn = None
+        return None
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("SELECT * FROM users WHERE chat_id = %s", (chat_id,))
         user_data = cur.fetchone()
-        
+        cur.close()
+        conn.close()
         if user_data and user_data.get("plan_expiry"):
             expiry = user_data["plan_expiry"]
             if isinstance(expiry, str):
@@ -101,58 +146,45 @@ def get_user_daily_limit(chat_id):
         return MAX_FREE_DAILY
     except:
         return MAX_FREE_DAILY
-    finally:
-        if conn:
-            conn.close()
 
 def check_limit(chat_id):
     if chat_id == ADMIN_ID:
         return True
-    conn = None
     try:
         today = datetime.now().strftime("%Y-%m-%d")
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("SELECT * FROM users WHERE chat_id = %s", (chat_id,))
         user_data = cur.fetchone()
-        
         if not user_data:
             cur.execute(
                 "INSERT INTO users (chat_id, count, date) VALUES (%s, 0, %s)",
                 (chat_id, today)
             )
             conn.commit()
+            cur.close()
+            conn.close()
             return True
-            
         if user_data.get("date") != today:
             cur.execute(
                 "UPDATE users SET count = 0, date = %s WHERE chat_id = %s",
                 (today, chat_id)
             )
             conn.commit()
-            # Re-fetch or reset local count
-            user_data['count'] = 0
-            
         daily_limit = get_user_daily_limit(chat_id)
-        
-        # None means unlimited (Lifetime/Admin)
-        if daily_limit is None:
-            return True
-            
         if user_data.get("count", 0) >= daily_limit:
+            cur.close()
+            conn.close()
             return False
-            
+        cur.close()
+        conn.close()
         return True
     except:
-        return True # Fail open if DB error
-    finally:
-        if conn:
-            conn.close()
+        return True
 
 def increment_usage(chat_id):
     if chat_id == ADMIN_ID:
         return
-    conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -161,16 +193,10 @@ def increment_usage(chat_id):
             (chat_id,)
         )
         conn.commit()
+        cur.close()
+        conn.close()
     except:
         pass
-    finally:
-        if conn:
-            conn.close()
-
-def generate_redemption_key(plan_type):
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
-
-# --- Helper Functions ---
 
 async def animate_progress(context, chat_id, message_id, stop_event):
     bars = [
@@ -190,8 +216,7 @@ async def animate_progress(context, chat_id, message_id, stop_event):
                 text=f"{bars[i % len(bars)]}\n\n_Please wait..._",
                 parse_mode="Markdown"
             )
-        except: 
-            pass # Ignore errors if message deleted
+        except: pass
         i += 1
         await asyncio.sleep(6)
 
@@ -208,8 +233,6 @@ def get_video_model_keyboard():
         [InlineKeyboardButton("🎨 Standard (DoP Standard)", callback_data="model_dop_standard")]
     ])
 
-# --- Handlers ---
-
 async def start(update, context):
     keyboard = [
         [InlineKeyboardButton("🖼 Text → Image (Standard)", callback_data="text2image")],
@@ -219,7 +242,7 @@ async def start(update, context):
         [InlineKeyboardButton("🎥 Image → Video", callback_data="image2video")]
     ]
     daily_limit = get_user_daily_limit(update.message.chat_id)
-    limit_text = f"{daily_limit}/day" if daily_limit is not None else "Unlimited"
+    limit_text = f"{daily_limit}/day" if daily_limit else "Unlimited"
     msg = (
         "🤖 *Welcome to Higgsfield AI Bot*\n"
         "Bot by @honeyhoney44\n\n"
@@ -263,39 +286,36 @@ async def command_redeem(update, context):
         return
     key = context.args[0].upper()
     chat_id = update.message.chat_id
-    conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("SELECT * FROM redemption_keys WHERE key = %s", (key,))
         key_data = cur.fetchone()
-        
         if not key_data:
             await update.message.reply_text("❌ Invalid redemption key!")
+            cur.close()
+            conn.close()
             return
         if key_data.get("used"):
             await update.message.reply_text("❌ This key has already been used!")
+            cur.close()
+            conn.close()
             return
-            
         plan_type = key_data["plan"]
         plan = PLANS[plan_type]
         expiry_date = datetime.now() + timedelta(days=plan["duration_days"])
-        
         cur.execute(
             "UPDATE redemption_keys SET used = TRUE, used_by = %s, used_date = NOW() WHERE key = %s",
             (chat_id, key)
         )
         today = datetime.now().strftime("%Y-%m-%d")
         cur.execute(
-            """INSERT INTO users (chat_id, count, date, plan_type, plan_expiry) 
-               VALUES (%s, 0, %s, %s, %s) 
-               ON CONFLICT (chat_id) DO UPDATE SET 
-               plan_type = EXCLUDED.plan_type, 
-               plan_expiry = EXCLUDED.plan_expiry""",
+            "INSERT INTO users (chat_id, count, date, plan_type, plan_expiry) VALUES (%s, 0, %s, %s, %s) ON CONFLICT (chat_id) DO UPDATE SET plan_type = EXCLUDED.plan_type, plan_expiry = EXCLUDED.plan_expiry",
             (chat_id, today, plan_type, expiry_date)
         )
         conn.commit()
-        
+        cur.close()
+        conn.close()
         user_name = update.message.from_user.first_name or "Unknown"
         try:
             await context.bot.send_message(
@@ -309,7 +329,6 @@ async def command_redeem(update, context):
             )
         except:
             pass
-            
         await update.message.reply_text(
             f"✅ *Plan Activated!*\n\n"
             f"Plan: {plan['name']}\n"
@@ -320,9 +339,6 @@ async def command_redeem(update, context):
         )
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
-    finally:
-        if conn:
-            conn.close()
 
 async def admin_genkey(update, context):
     if update.message.chat_id != ADMIN_ID:
@@ -345,28 +361,25 @@ async def admin_genkey(update, context):
     if plan not in PLANS:
         await update.message.reply_text(f"❌ Invalid plan. Use: {', '.join(PLANS.keys())}")
         return
-    
-    conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         generated = []
         for _ in range(count):
             key = generate_redemption_key(plan)
-            # Ensure uniqueness
             while True:
                 cur.execute("SELECT key FROM redemption_keys WHERE key = %s", (key,))
                 if not cur.fetchone():
                     break
                 key = generate_redemption_key(plan)
-            
             cur.execute(
                 "INSERT INTO redemption_keys (key, plan) VALUES (%s, %s)",
                 (key, plan)
             )
             generated.append(key)
         conn.commit()
-        
+        cur.close()
+        conn.close()
         keys_list = "\n".join(generated)
         await update.message.reply_text(
             f"✅ Generated {count} {plan.upper()} keys:\n\n`{keys_list}`",
@@ -374,9 +387,6 @@ async def admin_genkey(update, context):
         )
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
-    finally:
-        if conn:
-            conn.close()
 
 async def command_image(update, context):
     chat_id = update.message.chat_id
@@ -401,7 +411,6 @@ async def button_handler(update, context):
     await q.answer()
     data = q.data
     chat_id = q.message.chat_id
-    
     if data.startswith("model_"):
         session = user_sessions.get(chat_id)
         if not session:
@@ -421,7 +430,6 @@ async def button_handler(update, context):
             reply_markup=get_ratio_keyboard()
         )
         return
-
     if data.startswith("ratio_"):
         session = user_sessions.get(chat_id)
         if not session:
@@ -431,7 +439,6 @@ async def button_handler(update, context):
         session["aspect_ratio"] = ratio
         session["step"] = "waiting_input"
         ratio_label = {"9:16": "📱 9:16", "16:9": "💻 16:9", "1:1": "⬜ 1:1"}.get(ratio, ratio)
-        
         if session["mode"] == "text2image":
             await q.edit_message_text(
                 f"✅ Aspect Ratio: *{ratio_label}*\n\n📝 Now send your *text prompt* to generate an image:",
@@ -448,8 +455,7 @@ async def button_handler(update, context):
                 parse_mode="Markdown"
             )
         return
-
-    # Mode Selection
+    # Handle standard text2image, nano text2image, hailuo text2video, sora text2video, and image2video
     if data in ["text2image", "image2video", "text2image_nano", "text2video_hailuo", "text2video_sora"]:
         if data == "text2image":
             user_sessions[chat_id] = {"mode": "text2image", "step": "waiting_ratio"}
@@ -459,6 +465,7 @@ async def button_handler(update, context):
                 reply_markup=get_ratio_keyboard()
             )
         elif data == "text2image_nano":
+            # mark session to use Nano Banana provider
             user_sessions[chat_id] = {"mode": "text2image", "step": "waiting_ratio", "nano_banana": True}
             await q.edit_message_text(
                 "🤖 *Nano Banana — Text to Image Mode*\n\nSelect your preferred aspect ratio:",
@@ -466,12 +473,14 @@ async def button_handler(update, context):
                 reply_markup=get_ratio_keyboard()
             )
         elif data == "text2video_hailuo":
+            # Start Hailuo simple flow: ask for prompt immediately
             user_sessions[chat_id] = {"mode": "hailuo", "step": "waiting_prompt"}
             await q.edit_message_text(
                 "🎬 *Hailuo Text → Video*\n\nSend your *text prompt* and I will generate a vertical 720x1280 video for you:",
                 parse_mode="Markdown"
             )
         elif data == "text2video_sora":
+            # Start Sora simple flow: ask for prompt immediately
             user_sessions[chat_id] = {"mode": "sora", "step": "waiting_prompt"}
             await q.edit_message_text(
                 "🎬 *Sora Text → Video*\n\nSend your *text prompt* and I will generate a video for you (default 1280x720):",
@@ -523,31 +532,32 @@ async def text_handler(update, context):
         await update.message.reply_text("Please select a mode: /image or /video")
         return
 
-    # --- Sora simple flow ---
+    # --- Sora simple flow: waiting_prompt ---
     if session.get("mode") == "sora" and session.get("step") == "waiting_prompt":
         if not check_limit(chat_id):
             daily_limit = get_user_daily_limit(chat_id)
             await update.message.reply_text(
-                f"❌ Daily Limit Reached\nLimit: {daily_limit}\nUse `/redeem KEY` for more.",
+                f"❌ Daily Limit Reached\n"
+                f"You've used all {daily_limit} generations today.\n\n"
+                f"Use `/redeem KEY` to get more generations",
                 parse_mode="Markdown"
             )
             return
         status_msg = await update.message.reply_text("⏳ Generating Sora video (1280x720)... This can take a while.")
         try:
             loop = asyncio.get_event_loop()
+            # default Sora size set to 1280x720 (16:9)
             result = await loop.run_in_executor(None, generate_sora_video, text, 4, "1280x720")
-            
-            video_bytes = None
-            final_url = None
             if isinstance(result, tuple):
                 video_bytes, final_url = result
             else:
                 video_bytes = result
-            
+                final_url = None
+
             if not video_bytes:
                 raise ValueError("No video bytes received from Sora")
 
-            import os as _os, tempfile
+            import io, os as _os, tempfile
             tf = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
             try:
                 tf.write(video_bytes)
@@ -555,33 +565,53 @@ async def text_handler(update, context):
                 tf.close()
                 filesize = _os.path.getsize(tf.name)
                 try:
-                    if filesize <= 50 * 1024 * 1024:
+                    if filesize <= 50 * 1024 * 1024:  # 50 MB threshold
                         await update.message.reply_video(open(tf.name, "rb"), caption="🎬 Generated by Sora")
                     else:
                         await update.message.reply_document(open(tf.name, "rb"), caption="🎬 Generated by Sora (document)")
-                except:
-                    if final_url:
-                        await update.message.reply_text(f"✅ Video ready. Download: {final_url}")
+                except Exception as send_err:
+                    try:
+                        if final_url:
+                            await update.message.reply_text(f"✅ Video ready but sending failed. Download here: {final_url}")
+                        else:
+                            await update.message.reply_text(f"✅ Video ready but sending failed. Error: {send_err}")
+                    except:
+                        pass
                 increment_usage(chat_id)
             finally:
-                try: _os.unlink(tf.name)
-                except: pass
-            
-            try: await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
-            except: pass
+                try:
+                    _os.unlink(tf.name)
+                except:
+                    pass
+
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+            except:
+                pass
+            return
+        except SoraError as se:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+            except:
+                pass
+            await update.message.reply_text(f"❌ Sora error: {se}")
             return
         except Exception as e:
-            try: await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
-            except: pass
-            await update.message.reply_text(f"❌ Sora error: {e}")
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+            except:
+                pass
+            await update.message.reply_text(f"❌ Unexpected Sora error: {e}")
             return
 
-    # --- Hailuo simple flow ---
+    # --- Hailuo simple flow: waiting_prompt (unchanged) ---
     if session.get("mode") == "hailuo" and session.get("step") == "waiting_prompt":
         if not check_limit(chat_id):
             daily_limit = get_user_daily_limit(chat_id)
             await update.message.reply_text(
-                f"❌ Daily Limit Reached\nLimit: {daily_limit}\nUse `/redeem KEY` for more.",
+                f"❌ Daily Limit Reached\n"
+                f"You've used all {daily_limit} generations today.\n\n"
+                f"Use `/redeem KEY` to get more generations",
                 parse_mode="Markdown"
             )
             return
@@ -589,18 +619,17 @@ async def text_handler(update, context):
         try:
             loop = asyncio.get_event_loop()
             video_result = await loop.run_in_executor(None, generate_hailuo_video, text, 6, "720x1280")
-            
             video_bytes = None
             final_url = None
             if isinstance(video_result, tuple):
                 video_bytes, final_url = video_result
             else:
                 video_bytes = video_result
-            
-            if not video_bytes:
-                raise ValueError("No video bytes received")
 
-            import os as _os, tempfile
+            if not video_bytes:
+                raise ValueError("No video bytes received from Hailuo")
+
+            import io, os as _os, tempfile
             tf = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
             try:
                 tf.write(video_bytes)
@@ -612,41 +641,57 @@ async def text_handler(update, context):
                         await update.message.reply_video(open(tf.name, "rb"), caption="🎬 Generated by Hailuo")
                     else:
                         await update.message.reply_document(open(tf.name, "rb"), caption="🎬 Generated by Hailuo (document)")
-                except:
-                    if final_url:
-                        await update.message.reply_text(f"✅ Video ready. Download: {final_url}")
+                except Exception as send_err:
+                    try:
+                        if final_url:
+                            await update.message.reply_text(f"✅ Video ready but sending failed. Download here: {final_url}")
+                        else:
+                            await update.message.reply_text(f"✅ Video ready but sending failed. Error: {send_err}")
+                    except:
+                        pass
                 increment_usage(chat_id)
             finally:
-                try: _os.unlink(tf.name)
-                except: pass
-            
-            try: await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
-            except: pass
+                try:
+                    _os.unlink(tf.name)
+                except:
+                    pass
+
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+            except:
+                pass
+            return
+        except HailuoError as he:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+            except:
+                pass
+            await update.message.reply_text(f"❌ Hailuo error: {he}")
             return
         except Exception as e:
-            try: await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
-            except: pass
-            await update.message.reply_text(f"❌ Hailuo error: {e}")
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+            except:
+                pass
+            await update.message.reply_text(f"❌ Unexpected Hailuo error: {e}")
             return
 
-    # --- Standard Flows (Nano, Higgsfield, Image2Video) ---
-    
+    # fallback: previous logic for other flows (unchanged)
     if session.get("step") == "waiting_ratio":
         await update.message.reply_text(
             "⚠️ Please select an aspect ratio first:",
             reply_markup=get_ratio_keyboard()
         )
         return
-
     if not check_limit(chat_id):
         daily_limit = get_user_daily_limit(chat_id)
         await update.message.reply_text(
-            f"❌ Daily Limit Reached\nLimit: {daily_limit}\nUse `/redeem KEY` for more.",
+            f"❌ Daily Limit Reached\n"
+            f"You've used all {daily_limit} generations today.\n\n"
+            f"Use `/redeem KEY` to get more generations",
             parse_mode="Markdown"
         )
         return
-
-    # Log to Admin
     try:
         user_name = update.message.from_user.first_name
         ratio = session.get("aspect_ratio", "1:1")
@@ -656,82 +701,74 @@ async def text_handler(update, context):
             parse_mode="Markdown"
         )
     except: pass
-
+    hf = HiggsfieldAPI(os.getenv("HF_KEY"), os.getenv("HF_SECRET"))
+    payload = {}
+    model_id = ""
     status_msg = await update.message.reply_text("⏳ Initializing...")
     aspect_ratio = session.get("aspect_ratio", "1:1")
-    
-    # Init animation
-    stop_event = asyncio.Event()
-    animation_task = asyncio.create_task(animate_progress(context, chat_id, status_msg.message_id, stop_event))
 
-    try:
-        # --- Nano Banana Branch ---
-        if session["mode"] == "text2image" and session.get("nano_banana"):
+    # --- Nano Banana branch (unchanged) ---
+    if session["mode"] == "text2image" and session.get("nano_banana"):
+        try:
+            await update.message.reply_text("⏳ Generating image with Nano Banana…")
+            loop = asyncio.get_event_loop()
+            from nano_banana_api import generate_nano_image, NanoBananaError
+
+            size_map = {"9:16": "1024x2048", "16:9": "2048x1024", "1:1": "1024x1024"}
+            size = size_map.get(aspect_ratio, "1024x1024")
+
+            image_bytes = await loop.run_in_executor(None, generate_nano_image, text, size)
+
+            import io
+            bio = io.BytesIO(image_bytes)
+            bio.name = "nano.png"
+            bio.seek(0)
+
+            increment_usage(chat_id)
+
+            await update.message.reply_document(document=bio)
+
+            user_mention = update.message.from_user.first_name or "Unknown"
+            ratio_label = {"9:16": "📱 9:16", "16:9": "💻 16:9", "1:1": "⬜ 1:1"}.get(aspect_ratio, aspect_ratio)
+            log_text = (
+                f"🧾 *Log*\n"
+                f"👤 {user_mention} (`{chat_id}`)\n"
+                f"🎯 text2image\n"
+                f"📐 Ratio: {ratio_label}\n\n"
+                f"📝 {text[:800]}"
+            )
+            await update.message.reply_text(log_text, parse_mode="Markdown")
+
             try:
-                loop = asyncio.get_event_loop()
-                from nano_banana_api import generate_nano_image
-                size_map = {"9:16": "1024x2048", "16:9": "2048x1024", "1:1": "1024x1024"}
-                size = size_map.get(aspect_ratio, "1024x1024")
-                image_bytes = await loop.run_in_executor(None, generate_nano_image, text, size)
+                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+            except:
+                pass
 
-                import io
-                bio = io.BytesIO(image_bytes)
-                bio.name = "nano.png"
-                bio.seek(0)
-                
-                # Stop animation BEFORE sending
-                stop_event.set()
-                try: await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
-                except: pass
+            return
+        except Exception as e:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+            except:
+                pass
+            await update.message.reply_text(f"❌ Nano Banana error: {e}")
+            return
 
-                await update.message.reply_document(document=bio)
-                increment_usage(chat_id)
-                
-                # Success log
-                user_mention = update.message.from_user.first_name or "Unknown"
-                ratio_label = {"9:16": "📱 9:16", "16:9": "💻 16:9", "1:1": "⬜ 1:1"}.get(aspect_ratio, aspect_ratio)
-                log_text = (
-                    f"🧾 *Log*\n"
-                    f"👤 {user_mention} (`{chat_id}`)\n"
-                    f"🎯 text2image\n"
-                    f"📐 Ratio: {ratio_label}\n\n"
-                    f"📝 {text[:800]}"
-                )
-                await update.message.reply_text(log_text, parse_mode="Markdown")
-                return
-
-            except Exception as e:
-                raise e # Pass to outer except to stop animation
-
-        # --- Higgsfield Branch ---
-        hf = HiggsfieldAPI(os.getenv("HF_KEY"), os.getenv("HF_SECRET"))
-        payload = {}
-        model_id = ""
-
-        if session["mode"] == "text2image":
-            model_id = "higgsfield-ai/soul/standard"
-            payload = {"prompt": text, "aspect_ratio": aspect_ratio}
-        elif session["mode"] == "image2video":
-            if session.get("step") != "waiting_prompt":
-                await update.message.reply_text("Send an image first!")
-                stop_event.set()
-                return
-            if "image_url" not in session:
-                await update.message.reply_text("❌ Session error: No image found. Please start over.")
-                stop_event.set()
-                return
-                
-            model_id = session.get("video_model", "higgsfield-ai/dop/turbo")
-            payload = {"prompt": text, "image_url": session["image_url"], "aspect_ratio": aspect_ratio}
-
+    # --- Existing HuggingFace / Higgsfield flow (unchanged) ---
+    if session["mode"] == "text2image":
+        model_id = "higgsfield-ai/soul/standard"
+        payload = {"prompt": text, "aspect_ratio": aspect_ratio}
+    elif session["mode"] == "image2video":
+        if session.get("step") != "waiting_prompt":
+            await update.message.reply_text("Send an image first!")
+            return
+        model_id = session.get("video_model", "higgsfield-ai/dop/turbo")
+        payload = {"prompt": text, "image_url": session["image_url"], "aspect_ratio": aspect_ratio}
+    stop_event = asyncio.Event()
+    asyncio.create_task(animate_progress(context, chat_id, status_msg.message_id, stop_event))
+    try:
         resp = hf.submit(model_id, payload)
         final = await hf.wait_for_result(resp["request_id"])
-        
-        # Stop animation
         stop_event.set()
-        try: await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
-        except: pass
-
         if final.get("status") == "completed":
             increment_usage(chat_id)
             media_url = None
@@ -741,23 +778,18 @@ async def text_handler(update, context):
                 media_url = v.get("url") if isinstance(v, dict) else (v[0].get("url") if isinstance(v, list) else v)
             elif "output_url" in final: media_url = final["output_url"]
             elif "result" in final: media_url = final["result"]
-            
             if not media_url: raise ValueError(f"No URL found: {final.keys()}")
-            
             ratio_label = {"9:16": "📱 9:16", "16:9": "💻 16:9", "1:1": "⬜ 1:1"}.get(aspect_ratio, aspect_ratio)
             caption_text = f"✨ Here is your result!\n📐 Ratio: {ratio_label}\n\n🔔 Subscribe: @HiggsMasterBotChannel"
-            
             if session["mode"] == "image2video":
                 await update.message.reply_video(media_url, caption=caption_text)
             else:
                 await update.message.reply_photo(media_url, caption=caption_text)
+            await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
         else:
             await update.message.reply_text(f"❌ Failed: {final.get('status')}")
-
     except Exception as e:
         stop_event.set()
-        try: await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
-        except: pass
         await update.message.reply_text(f"❌ Error: {e}")
 
 async def command_help(update, context):
@@ -781,23 +813,20 @@ async def command_help(update, context):
 async def command_quota(update, context):
     chat_id = update.message.chat_id
     daily_limit = get_user_daily_limit(chat_id)
-    conn = None
     try:
         today = datetime.now().strftime("%Y-%m-%d")
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("SELECT count, date FROM users WHERE chat_id = %s", (chat_id,))
         user_data = cur.fetchone()
-        
+        cur.close()
+        conn.close()
         if not user_data or user_data.get("date") != today:
             used = 0
         else:
             used = user_data.get("count", 0)
     except:
         used = 0
-    finally:
-        if conn: conn.close()
-        
     if daily_limit is None:
         remaining_text = "∞ (Unlimited)"
         limit_text = "Unlimited"
@@ -805,7 +834,6 @@ async def command_quota(update, context):
         remaining = max(0, daily_limit - used)
         remaining_text = f"{remaining}/{daily_limit}"
         limit_text = f"{daily_limit}/day"
-        
     quota_text = (
         f"📊 *Your Quota Today*\n\n"
         f"Remaining: {remaining_text}\n"
@@ -818,64 +846,69 @@ async def command_quota(update, context):
 async def command_myplan(update, context):
     chat_id = update.message.chat_id
     if chat_id == ADMIN_ID:
-        await update.message.reply_text(
+        plan_text = (
             "👑 *Admin Account*\n\n"
             "Unlimited generations forever\n\n"
-            "Use `/genkey PLAN COUNT` to generate redemption keys",
-            parse_mode="Markdown"
+            "Use `/genkey PLAN COUNT` to generate redemption keys"
         )
-        return
-
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute("SELECT * FROM users WHERE chat_id = %s", (chat_id,))
-        user_data = cur.fetchone()
-        
-        plan_text = ""
-        if user_data and user_data.get("plan_expiry"):
-            expiry = user_data["plan_expiry"]
-            if isinstance(expiry, str):
-                expiry = datetime.fromisoformat(expiry)
-            if datetime.now() < expiry:
-                plan_type = user_data.get("plan_type", "free")
-                plan = PLANS.get(plan_type, {})
-                days_left = (expiry - datetime.now()).days
-                daily_limit = plan.get("daily_limit", "∞")
-                plan_text = (
-                    f"🎯 *Your Current Plan*\n\n"
-                    f"Plan: {plan.get('name', 'Free')}\n"
-                    f"Daily limit: {daily_limit}\n"
-                    f"Expires in: {days_left} days\n"
-                    f"Expiry date: {expiry.strftime('%Y-%m-%d %H:%M UTC')}"
-                )
+    else:
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+            cur.execute("SELECT * FROM users WHERE chat_id = %s", (chat_id,))
+            user_data = cur.fetchone()
+            cur.close()
+            conn.close()
+            if user_data and user_data.get("plan_expiry"):
+                expiry = user_data["plan_expiry"]
+                if isinstance(expiry, str):
+                    expiry = datetime.fromisoformat(expiry)
+                if datetime.now() < expiry:
+                    plan_type = user_data.get("plan_type", "free")
+                    plan = PLANS.get(plan_type, {})
+                    days_left = (expiry - datetime.now()).days
+                    daily_limit = plan.get("daily_limit", "∞")
+                    plan_text = (
+                        f"🎯 *Your Current Plan*\n\n"
+                        f"Plan: {plan.get('name', 'Free')}\n"
+                        f"Daily limit: {daily_limit}\n"
+                        f"Expires in: {days_left} days\n"
+                        f"Expiry date: {expiry.strftime('%Y-%m-%d %H:%M UTC')}"
+                    )
+                else:
+                    plan_text = (
+                        "📌 *Free Tier*\n\n"
+                        f"Daily limit: {MAX_FREE_DAILY}\n\n"
+                        "Use `/redeem KEY` to upgrade to premium"
+                    )
             else:
-                plan_text = f"📌 *Free Tier*\n\nDaily limit: {MAX_FREE_DAILY}\n\nUse `/redeem KEY` to upgrade"
-        else:
-            plan_text = f"📌 *Free Tier*\n\nDaily limit: {MAX_FREE_DAILY}\n\nUse `/redeem KEY` to upgrade"
-            
-        await update.message.reply_text(plan_text, parse_mode="Markdown")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error fetching plan: {e}")
-    finally:
-        if conn: conn.close()
+                plan_text = (
+                    "📌 *Free Tier*\n\n"
+                    f"Daily limit: {MAX_FREE_DAILY}\n\n"
+                    "Use `/redeem KEY` to upgrade to premium"
+                )
+        except:
+            plan_text = (
+                "📌 *Free Tier*\n\n"
+                f"Daily limit: {MAX_FREE_DAILY}\n\n"
+                "Use `/redeem KEY` to upgrade to premium"
+            )
+    await update.message.reply_text(plan_text, parse_mode="Markdown")
 
 async def admin_members(update, context):
     if update.message.chat_id != ADMIN_ID:
         await update.message.reply_text("❌ Admin only!")
         return
-    conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("SELECT * FROM users WHERE plan_expiry > NOW() ORDER BY plan_expiry DESC")
         active_members = cur.fetchall()
-        
+        cur.close()
+        conn.close()
         if not active_members:
-            await update.message.reply_text("📊 *Active Members*\n\nNo active premium members yet", parse_mode="Markdown")
+            await update.message.reply_text("📊 *Active Members*\n\nNo active premium members yet")
             return
-            
         members_text = f"📊 *Active Premium Members* ({len(active_members)})\n\n"
         for member in active_members:
             plan_type = member.get("plan_type", "unknown")
@@ -890,14 +923,11 @@ async def admin_members(update, context):
         await update.message.reply_text(members_text, parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
-    finally:
-        if conn: conn.close()
 
 async def admin_dbstatus(update, context):
     if update.message.chat_id != ADMIN_ID:
         await update.message.reply_text("❌ Admin only!")
         return
-    conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -907,7 +937,8 @@ async def admin_dbstatus(update, context):
         premium_users = cur.fetchone()[0]
         cur.execute("SELECT COUNT(*) FROM redemption_keys WHERE used = FALSE")
         unused_keys = cur.fetchone()[0]
-        
+        cur.close()
+        conn.close()
         status_text = (
             f"📊 *Database Status*\n\n"
             f"👥 Total Users: {total_users}\n"
@@ -917,8 +948,6 @@ async def admin_dbstatus(update, context):
         await update.message.reply_text(status_text, parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
-    finally:
-        if conn: conn.close()
 
 async def admin_broadcast(update, context):
     if update.message.chat_id != ADMIN_ID:
@@ -932,17 +961,16 @@ async def admin_broadcast(update, context):
         )
         return
     message = " ".join(context.args)
-    conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("SELECT chat_id FROM users")
         user_ids = [row[0] for row in cur.fetchall()]
-        
+        cur.close()
+        conn.close()
         if not user_ids:
             await update.message.reply_text("❌ No users in database")
             return
-            
         status_msg = await update.message.reply_text(f"📢 Broadcasting to {len(user_ids)} users...")
         sent = 0
         failed = 0
@@ -963,13 +991,13 @@ async def admin_broadcast(update, context):
         )
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
-    finally:
-        if conn: conn.close()
 
 def register_handlers(app):
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("image", command_image))
+    # nano direct command (keeps existing flows intact)
     app.add_handler(CommandHandler("nano", t2i_nano_handler))
+    # hailuo direct command (if you have hailuo_handler)
     app.add_handler(CommandHandler("hailuo", t2v_hailuo_handler))
     app.add_handler(CommandHandler("video", command_video))
     app.add_handler(CommandHandler("plans", command_plans))
