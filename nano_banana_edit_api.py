@@ -28,7 +28,7 @@ def _pick_link(data: dict):
         return _pick_link(data["data"])
     return None
 
-def generate_nano_edit_image(init_image_url: str, prompt: str, size: Optional[str] = None,
+def generate_nano_edit_image(init_image_urls: list[str], prompt: str, size: Optional[str] = None,
                              model_id: Optional[str] = None, timeout: int = DEFAULT_TIMEOUT) -> Tuple[bytes, str]:
     """
     Submit a JSON job to ModelsLab using 'init_image' (a public URL string).
@@ -43,7 +43,7 @@ def generate_nano_edit_image(init_image_url: str, prompt: str, size: Optional[st
     payload = {
         "key": MODELSLAB_KEY,
         "model_id": model,
-        "init_image": init_image_url,
+        "init_image": init_image_urls,
         "prompt": prompt
     }
     if size:
@@ -63,6 +63,8 @@ def generate_nano_edit_image(init_image_url: str, prompt: str, size: Optional[st
         raise NanoBananaEditError(f"Non-JSON response: {resp.status_code}")
 
     if isinstance(j, dict) and j.get("status") == "error":
+        if "error" in j and "message" in j["error"]:
+            raise NanoBananaEditError(f"ModelsLab API error: {j['error']['message']}")
         raise NanoBananaEditError(f"ModelsLab API error: {j}")
 
     if isinstance(j, dict) and j.get("status") in ("success","completed"):
@@ -89,6 +91,8 @@ def generate_nano_edit_image(init_image_url: str, prompt: str, size: Optional[st
                 time.sleep(2)
                 continue
             if isinstance(pj, dict) and pj.get("status") == "error":
+                if "error" in pj and "message" in pj["error"]:
+                    raise NanoBananaEditError(f"Fetch error: {pj['error']['message']}")
                 raise NanoBananaEditError(f"Fetch error: {pj}")
             if isinstance(pj, dict) and pj.get("status") in ("success","completed"):
                 link = _pick_link(pj)
