@@ -151,7 +151,9 @@ def check_limit(chat_id):
     if chat_id == ADMIN_ID:
         return True
     try:
-        today = datetime.now().strftime("%Y-%m-%d")
+        today_date = datetime.now().date()
+        today_date = datetime.now().date()
+        today_str = today_date.strftime("%Y-%m-%d")
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("SELECT * FROM users WHERE chat_id = %s", (chat_id,))
@@ -159,16 +161,16 @@ def check_limit(chat_id):
         if not user_data:
             cur.execute(
                 "INSERT INTO users (chat_id, count, date) VALUES (%s, 0, %s)",
-                (chat_id, today)
+                (chat_id, today_str)
             )
             conn.commit()
             cur.close()
             conn.close()
             return True
-        if user_data.get("date") != today:
+        if user_data.get("date") != today_date:
             cur.execute(
                 "UPDATE users SET count = 0, date = %s WHERE chat_id = %s",
-                (today, chat_id)
+                (today_str, chat_id)
             )
             conn.commit()
         daily_limit = get_user_daily_limit(chat_id)
@@ -308,10 +310,11 @@ async def command_redeem(update, context):
             "UPDATE redemption_keys SET used = TRUE, used_by = %s, used_date = NOW() WHERE key = %s",
             (chat_id, key)
         )
-        today = datetime.now().strftime("%Y-%m-%d")
+        today_date = datetime.now().date()
+        today_str = today_date.strftime("%Y-%m-%d")
         cur.execute(
             "INSERT INTO users (chat_id, count, date, plan_type, plan_expiry) VALUES (%s, 0, %s, %s, %s) ON CONFLICT (chat_id) DO UPDATE SET plan_type = EXCLUDED.plan_type, plan_expiry = EXCLUDED.plan_expiry",
-            (chat_id, today, plan_type, expiry_date)
+            (chat_id, today_str, plan_type, expiry_date)
         )
         conn.commit()
         cur.close()
@@ -814,7 +817,8 @@ async def command_quota(update, context):
     chat_id = update.message.chat_id
     daily_limit = get_user_daily_limit(chat_id)
     try:
-        today = datetime.now().strftime("%Y-%m-%d")
+        today_date = datetime.now().date()
+        today_str = today_date.strftime("%Y-%m-%d")
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("SELECT count, date FROM users WHERE chat_id = %s", (chat_id,))
